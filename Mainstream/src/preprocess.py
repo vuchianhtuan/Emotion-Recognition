@@ -6,6 +6,8 @@ Xử lý tín hiệu EEG thô từ DEAP dataset:
   - Baseline removal (trừ trung bình 3 giây đầu)
   - Tính Power Spectral Density (PSD) bằng Welch method
   - Tính Differential Entropy (DE)
+  - Tính FFT band-power 5 dải (Theta/Alpha/LowerBeta/UpperBeta/Gamma)
+    dùng cho pipeline MRMR – thay thế pyeeg.bin_power bằng numpy FFT
 """
 
 import numpy as np
@@ -21,6 +23,10 @@ BANDS = {
     "gamma": (30, 45),
 }
 BASELINE_SECONDS = 3  # Số giây đầu dùng làm baseline
+
+# 5-band edges dùng cho pipeline MRMR (khớp với DEAP-Emotion-Recognition gốc)
+MRMR_BANDS = [4, 8, 12, 16, 25, 45]   # Theta / Alpha / LowerBeta / UpperBeta / Gamma
+MRMR_BAND_NAMES = ["Theta", "Alpha", "LowerBeta", "UpperBeta", "Gamma"]
 
 
 # ----------- Filtering -----------
@@ -93,4 +99,66 @@ def extract_features(trial: np.ndarray, mode: str = "psd", fs: int = SAMPLING_RA
     for ch in trial:
         band_feats = compute_fn(ch, fs)
         features.append(list(band_feats.values()))
+    return np.array(features, dtype=np.float32)
+
+
+# ----------- FFT 5-band power (MRMR pipeline) -----------
+
+def bin_power_fft(
+    x: np.ndarray,
+    band: list = None,
+    fs: int = SAMPLING_RATE,
+) -> np.ndarray:
+    """Compute mean FFT power per frequency band for a 1-D signal.
+
+    Replaces ``pyeeg.bin_power`` from the original DEAP-Emotion-Recognition code.
+
+    Args:
+        x   : 1-D EEG signal.
+        band: Band-edge list, e.g. ``[4, 8, 12, 16, 25, 45]``.
+              Defaults to ``MRMR_BANDS``.
+        fs  : Sampling rate in Hz.
+
+    Returns:
+        powers: Array of shape ``(len(band) - 1,)`` — mean FFT power per band.
+    """
+    if band is None:
+        band = MRMR_BANDS
+
+    n = len(x)
+    fft_vals = np.abs(np.fft.rfft(x)) ** 2
+    freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+
+    powers = []
+    for i in range(len(band) - 1):
+        low, high = band[i], band[i + 1]
+        idx = np.where((freqs >= low) & (freqs < high))[0]
+        powers.append(float(np.mean(fft_vals[idx])) if len(idx) > 0 else 0.0)
+
+    return np.array(powers, dtype=np.float32)
+
+
+def extract_fft_features(
+    trial: np.ndarray,
+    band: list = None,
+    fs: int = SAMPLING_RATE,
+) -> np.ndarray:
+    """Compute FFT band-power for all EEG channels of one trial window.
+
+    Used by the MRMR pipeline (5-band version matching the original DEAP code).
+
+    Args:
+        trial: 2-D array of shape ``(n_channels, n_samples)``.
+        band : Band-edge list. Defaults to ``MRMR_BANDS``.
+        fs   : Sampling rate in Hz.
+
+    Returns:
+        features: Array of shape ``(n_channels, n_bands)`` — float32.
+    """
+    if band is None:
+        band = MRMR_BANDS
+
+    features = []
+    for ch in trial:
+        features.append(bin_power_fft(ch, band, fs))
     return np.array(features, dtype=np.float32)
