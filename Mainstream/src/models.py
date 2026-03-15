@@ -3,9 +3,11 @@ models.py
 ---------
 Định nghĩa kiến trúc mô hình phân loại cảm xúc từ EEG:
 
-  1. EEGConvNet  – 1-D CNN trên trục kênh
-  2. EEGLSTM     – Bidirectional LSTM
-  3. EEGTransformer – Lightweight Transformer Encoder
+  1. EEGConvNet      – 1-D CNN trên trục kênh
+  2. EEGLSTM         – Bidirectional LSTM
+  3. EEGTransformer  – Lightweight Transformer Encoder
+  4. EEGMRMRLSTMNet  – Bidirectional LSTM cho pipeline MRMR
+                       (khớp với kiến trúc gốc DEAP-Emotion-Recognition)
 """
 
 import torch
@@ -114,12 +116,85 @@ class EEGTransformer(nn.Module):
 
 
 # ------------------------------------------------------------------ #
+#  4. Bidirectional LSTM for MRMR pipeline
+# ------------------------------------------------------------------ #
+class EEGMRMRLSTMNet(nn.Module):
+    """Bidirectional LSTM khớp với kiến trúc gốc DEAP-Emotion-Recognition.
+
+    Input : ``(batch, seq_len, 1)`` — seq_len = K_channels × N_freq_bands
+    Output: ``(batch, num_classes)``
+
+    Tầng LSTM giống nguyên bản TF/Keras:
+      BiLSTM(128) → LSTM(256) → LSTM(64) → LSTM(64) → LSTM(32) → Dense(16) → Dense(2)
+    """
+
+    def __init__(
+        self,
+        seq_len: int = 100,   # K=20 channels × 5 bands
+        num_classes: int = 2,
+        dropout: float = 0.5,
+    ):
+        super().__init__()
+
+        # Layer 1: Bidirectional LSTM (128 units → output 256)
+        self.bilstm = nn.LSTM(
+            input_size=1,
+            hidden_size=128,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=True,
+        )
+        self.drop1 = nn.Dropout(dropout)
+
+        # Layer 2-5: Unidirectional LSTM stack
+        self.lstm2 = nn.LSTM(input_size=256, hidden_size=256, batch_first=True)
+        self.drop2 = nn.Dropout(dropout)
+
+        self.lstm3 = nn.LSTM(input_size=256, hidden_size=64, batch_first=True)
+        self.drop3 = nn.Dropout(dropout)
+
+        self.lstm4 = nn.LSTM(input_size=64, hidden_size=64, batch_first=True)
+        self.drop4 = nn.Dropout(dropout)
+
+        self.lstm5 = nn.LSTM(input_size=64, hidden_size=32, batch_first=True)
+        self.drop5 = nn.Dropout(dropout * 0.7)  # original used 0.4 dropout here (≈ 0.5 × 0.7)
+
+        # Classifier head
+        self.fc = nn.Sequential(
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, seq_len, 1)
+        out, _ = self.bilstm(x)             # (B, seq_len, 256)
+        out = self.drop1(out)
+
+        out, _ = self.lstm2(out)            # (B, seq_len, 256)
+        out = self.drop2(out)
+
+        out, _ = self.lstm3(out)            # (B, seq_len, 64)
+        out = self.drop3(out)
+
+        out, _ = self.lstm4(out)            # (B, seq_len, 64)
+        out = self.drop4(out)
+
+        out, _ = self.lstm5(out)            # (B, seq_len, 32)
+        out = self.drop5(out)
+
+        out = out[:, -1, :]                 # last time-step: (B, 32)
+        return self.fc(out)
+
+
+# ------------------------------------------------------------------ #
 #  Factory
 # ------------------------------------------------------------------ #
 MODEL_REGISTRY = {
     "cnn":         EEGConvNet,
     "lstm":        EEGLSTM,
     "transformer": EEGTransformer,
+    "mrmr_lstm":   EEGMRMRLSTMNet,
 }
 
 
