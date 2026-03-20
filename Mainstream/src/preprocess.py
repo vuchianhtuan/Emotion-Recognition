@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import pickle
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,12 @@ def clean_eeg_trial_mne(
 
     if cfg.notch_freq > 0 and cfg.notch_freq < (cfg.fs / 2.0):
         raw.notch_filter(freqs=[cfg.notch_freq], verbose="ERROR")
+    elif cfg.notch_freq > 0:
+        warnings.warn(
+            f"Invalid notch_freq={cfg.notch_freq} for fs={cfg.fs}; skipping notch filtering.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     data = raw.get_data()
 
@@ -257,7 +264,7 @@ def preprocess_subject_for_mrmr(
 
         cleaned = clean_eeg_trial_mne(trial, cfg)
         start = 0
-        while start + cfg.window_size < cleaned.shape[1]:
+        while start + cfg.window_size <= cleaned.shape[1]:
             window = cleaned[:, start: start + cfg.window_size]
             feats = extract_fft_features(window, band=list(cfg.bands), fs=cfg.fs)
             meta.append(np.array([feats, label_bin], dtype=object))
@@ -325,7 +332,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--l-freq", type=float, default=4.0)
     parser.add_argument("--h-freq", type=float, default=45.0)
     parser.add_argument("--notch-freq", type=float, default=50.0)
-    parser.add_argument("--baseline-seconds", type=float, default=float(BASELINE_SECONDS))
+    parser.add_argument("--baseline-seconds", type=float, default=BASELINE_SECONDS)
     parser.add_argument("--artifact-zscore", type=float, default=5.0)
     parser.add_argument("--window-size", type=int, default=256)
     parser.add_argument("--overlap", type=float, default=0.9375)

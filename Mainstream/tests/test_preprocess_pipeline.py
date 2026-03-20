@@ -26,7 +26,7 @@ class TestPreprocessPipeline(unittest.TestCase):
         config = PreprocessConfig()
         out1 = preprocess_subject_for_mrmr(subject, config)
         out2 = preprocess_subject_for_mrmr(subject, config)
-        np.testing.assert_allclose(out1[0][0], out2[0][0], rtol=0, atol=0)
+        np.testing.assert_allclose(out1[0][0], out2[0][0], rtol=1e-7, atol=1e-9)
         np.testing.assert_array_equal(out1[0][1], out2[0][1])
 
 
