@@ -45,7 +45,7 @@ def prepare_dataset(label_type: str = "Arousal", pca: bool = False, mrmr: bool =
 
     scaler = StandardScaler()
     x_train = scaler.fit_transform(x_train)
-    x_test = scaler.fit_transform(x_test)
+    x_test = scaler.transform(x_test)
 
     x_train = x_train.reshape(x_train.shape[0], x_train.shape[1], 1)
     x_test = x_test.reshape(x_test.shape[0], x_test.shape[1], 1)
