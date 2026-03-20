@@ -78,6 +78,36 @@ python -m src.train --target valence --arch lstm   --feat psd --epochs 50
 python -m src.train --target arousal --arch transformer --feat de --epochs 50
 ```
 
+### 4. Preprocess chuẩn DEAP (MNE) ra `data/processed/`
+
+Pipeline preprocess đã chuẩn hóa theo schema trung gian:
+
+- `raw` (`.dat`) → `clean` (band-pass + notch + baseline + artifact clamp)
+- `window` (sliding window)
+- `feature` (FFT 5-band / channel)
+- `label` (`[valence_bin, arousal_bin]`)
+
+Chạy end-to-end:
+
+```bash
+python -m src.preprocess --data-dir data/raw --output-dir data/processed --version v2_mne
+```
+
+Output được version hóa tại:
+
+```text
+data/processed/v2_mne/s01.npz
+data/processed/v2_mne/s02.npz
+...
+```
+
+Mỗi `.npz` gồm:
+- `features`: `(n_windows, 32, 5)`
+- `labels`: `(n_windows, 2)`
+- `config_json`: cấu hình preprocess để reproducible
+
+`src.mrmr_selection.preprocess_subject_fft` và pipeline train/app MRMR dùng cùng core preprocess này để bảo đảm thống nhất train và inference.
+
 ---
 
 ## 🧪 Kiến trúc mô hình
