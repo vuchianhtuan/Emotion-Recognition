@@ -159,7 +159,9 @@ def preprocess_subject_fft(
         meta: Array of shape ``(n_windows,)`` with dtype ``object``.
               Each element is ``[features, label_bin]`` where
               ``features`` has shape ``(N_CHANNELS, N_FREQUENCIES)`` and
-              ``label_bin`` is ``[arousal_bin, valence_bin]``.
+              ``label_bin`` is ``[valence_bin, arousal_bin]`` — matching the
+              DEAP label order used by ``PreProcessing/FFT.py`` (col 0 = valence,
+              col 1 = arousal).
     """
     if band is None:
         band = BANDS
@@ -167,6 +169,8 @@ def preprocess_subject_fft(
     meta = []
     for trial_idx in range(40):
         data = subject["data"][trial_idx]       # (40_ch, 8064_samples)
+        # DEAP labels order: [valence, arousal, dominance, liking]
+        # Take first two → [valence, arousal]; matches PreProcessing/FFT.py
         labels = subject["labels"][trial_idx][:2]  # [valence, arousal]
 
         start = 0
@@ -206,14 +210,21 @@ def run_mrmr_selection(
     n_windows = preprocessed_data.shape[0]
 
     data_list = [preprocessed_data[i][0] for i in range(n_windows)]   # (N_CH, N_FREQ)
-    label_list = [preprocessed_data[i][1] for i in range(n_windows)]  # [a, v]
+    label_list = [preprocessed_data[i][1] for i in range(n_windows)]  # [valence_bin, arousal_bin]
 
     data = np.array(data_list)    # (n_windows, N_CH, N_FREQ)
-    labels = np.array(label_list)  # (n_windows, 2)
+    labels = np.array(label_list)  # (n_windows, 2)  col 0=valence, col 1=arousal
 
-    # Reshape to (n_windows * N_FREQ, N_CH) — each row is one time-frequency frame
-    x = data.transpose((1, 0, 2)).reshape(N_CHANNELS, -1).transpose((1, 0))
+    # Reshape to (n_windows * N_FREQ, N_CH) — each row is one time-frequency frame.
+    # Use data.shape[1] (actual channel count) instead of the N_CHANNELS constant
+    # to avoid incorrect reshape if the data has a non-default number of channels.
+    n_ch = data.shape[1]
+    x = data.transpose((1, 0, 2)).reshape(n_ch, -1).transpose((1, 0))
 
+    # Mirrors FeatureExtraction/MRMR.py: col 0 for "arousal", col 1 for "valence".
+    # Note: DEAP labels are stored as [valence, arousal], so col 0 is valence and
+    # col 1 is arousal — this intentionally reproduces the original DEAP column
+    # selection to keep selection behavior aligned with DEAP-Emotion-Recognition.
     if classify_type.lower() == "arousal":
         y = np.repeat(labels[:, 0], N_FREQUENCIES)
     else:
@@ -239,7 +250,8 @@ def build_mrmr_dataset(
     Returns:
         x_train, y_train, x_test, y_test — raw (unscaled) numpy arrays.
         Each sample in x is shape ``(K * N_FREQ,)``.
-        Each label in y is shape ``(2,)`` — ``[arousal_bin, valence_bin]``.
+        Each label in y is shape ``(2,)`` — ``[valence_bin, arousal_bin]``
+        (col 0 = valence, col 1 = arousal; matches DEAP label storage order).
     """
     x_train, y_train = [], []
     x_test, y_test = [], []
@@ -250,10 +262,13 @@ def build_mrmr_dataset(
         label_list = [sub_data[i][1] for i in range(n_windows)]
 
         data = np.array(data_list)    # (n_windows, N_CH, N_FREQ)
-        labels = np.array(label_list)  # (n_windows, 2)
+        labels = np.array(label_list)  # (n_windows, 2)  col 0=valence, col 1=arousal
 
-        # (n_windows * N_FREQ, N_CH)
-        x_all = data.transpose((1, 0, 2)).reshape(N_CHANNELS, -1).transpose((1, 0))
+        # Flatten to (n_windows * N_FREQ, N_CH) — mirrors FeatureExtraction/MRMR.py.
+        # Use data.shape[1] (actual channel count) instead of N_CHANNELS constant
+        # to guard against mismatched preprocessing configurations.
+        n_ch = data.shape[1]
+        x_all = data.transpose((1, 0, 2)).reshape(n_ch, -1).transpose((1, 0))
         x_df = pd.DataFrame(x_all)
         data_new = x_df[selected_channels].to_numpy()  # (n_windows*N_FREQ, K)
 
@@ -318,7 +333,10 @@ def prepare_for_lstm(
     x_train = x_train.reshape(x_train.shape[0], x_train.shape[1], 1)
     x_test = x_test.reshape(x_test.shape[0], x_test.shape[1], 1)
 
-    # Select label column: [0]=arousal, [1]=valence (DEAP label order)
+    # Select label column.
+    # DEAP stores labels as [valence, arousal] → col 0 = valence, col 1 = arousal.
+    # FeatureExtraction/MRMR.py and PrepareDataset.py both use col 0 for "Arousal"
+    # and col 1 for "Valence" — we reproduce that convention here for full alignment.
     col = 0 if classify_type.lower() == "arousal" else 1
     y_train_bin = y_train[:, col]
     y_test_bin = y_test[:, col]
