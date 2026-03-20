@@ -1,10 +1,38 @@
 from pathlib import Path
 
 import numpy as np
-import pyeeg as pe
 
 from Utils.Constants import PREPROCESSED_DATA_PATH, PREPROCESSED_DATA_PATH_FS
 from Utils.Helper import delete_leading_zero
+
+
+def bin_power_fft(x, band, fs):
+    """Compute mean FFT power per frequency band for a 1-D signal.
+
+    Replaces the deprecated ``pyeeg.bin_power`` using NumPy FFT.
+
+    Args:
+        x   : 1-D EEG signal.
+        band: List of band-edge frequencies, e.g. [4, 8, 12, 16, 25, 45].
+        fs  : Sampling rate in Hz.
+
+    Returns:
+        Tuple of (powers, power_ratio) where ``powers`` is a list of mean FFT
+        power per band, matching the interface of ``pyeeg.bin_power``.
+    """
+    n = len(x)
+    fft_vals = np.abs(np.fft.rfft(x)) ** 2
+    freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+
+    powers = []
+    for i in range(len(band) - 1):
+        low, high = band[i], band[i + 1]
+        idx = np.where((freqs >= low) & (freqs < high))[0]
+        powers.append(float(np.mean(fft_vals[idx])) if len(idx) > 0 else 0.0)
+
+    total = sum(powers)
+    power_ratio = [p / total if total > 0 else 0.0 for p in powers]
+    return powers, power_ratio
 
 
 def fft_processing(subject, filename, channels, band, window_size, step_size, sample_rate, overwrite, fs=False):
@@ -30,7 +58,7 @@ def fft_processing(subject, filename, channels, band, window_size, step_size, sa
                     # Slice raw data over 2 sec, at interval of 0.125 sec
                     x = data[j][start: start + window_size]
                     # FFT over 2 sec of channel j, in seq of theta, alpha, low beta, high beta, gamma
-                    y = pe.bin_power(x, band, sample_rate)
+                    y = bin_power_fft(x, band, sample_rate)
                     if (fs):
                         meta_data.append(np.array(y[0]))
                     else:
