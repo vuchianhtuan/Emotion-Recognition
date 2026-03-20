@@ -28,6 +28,8 @@ import pandas as pd
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.preprocessing import StandardScaler, normalize
 
+from .preprocess import PreprocessConfig, preprocess_subject_for_mrmr
+
 
 # ─────────────────────────── Constants ────────────────────────────────────── #
 
@@ -163,29 +165,15 @@ def preprocess_subject_fft(
               DEAP label order used by ``PreProcessing/FFT.py`` (col 0 = valence,
               col 1 = arousal).
     """
-    if band is None:
-        band = BANDS
-
-    meta = []
-    for trial_idx in range(40):
-        data = subject["data"][trial_idx]       # (40_ch, 8064_samples)
-        # DEAP labels order: [valence, arousal, dominance, liking]
-        # Take first two → [valence, arousal]; matches PreProcessing/FFT.py
-        labels = subject["labels"][trial_idx][:2]  # [valence, arousal]
-
-        start = 0
-        while start + window_size < data.shape[1]:
-            meta_data = []
-            for ch in range(N_CHANNELS):
-                x = data[ch][start: start + window_size]
-                meta_data.append(bin_power_fft(x, band, fs))  # (N_FREQ,)
-
-            meta_array = np.array(meta_data)          # (N_CHANNELS, N_FREQ)
-            label_bin = (labels >= LABEL_THRESHOLD).astype(int)
-            meta.append(np.array([meta_array, label_bin], dtype=object))
-            start += step_size
-
-    return np.array(meta, dtype=object)
+    cfg = PreprocessConfig(
+        fs=fs,
+        window_size=window_size,
+        overlap=1.0 - (step_size / float(window_size)),
+        n_eeg_channels=N_CHANNELS,
+        label_threshold=LABEL_THRESHOLD,
+        bands=tuple(BANDS if band is None else band),
+    )
+    return preprocess_subject_for_mrmr(subject, cfg)
 
 
 # ─────────────────────────── MRMR selection ───────────────────────────────── #
