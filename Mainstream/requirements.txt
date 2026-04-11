@@ -2,10 +2,10 @@
 numpy>=1.24
 scipy>=1.10
 mne>=1.5
+mrmr_selection>=0.2.8
 
-# Deep Learning (PyTorch)
-torch>=2.1
-torchvision>=0.16
+# Deep Learning (Chuyển sang PyTorch hoàn toàn)
+torch>=2.0.0
 
 # Web Dashboard
 streamlit>=1.30

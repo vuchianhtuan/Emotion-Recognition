@@ -40,14 +40,10 @@ def save_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
     }, path)
 
 
-def load_checkpoint(model: torch.nn.Module, path: str,
-                    optimizer: torch.optim.Optimizer | None = None) -> int:
-    """Load checkpoint vào model (và optimizer nếu cần). Trả về epoch đã lưu."""
-    ckpt  = torch.load(path, map_location="cpu")
-    model.load_state_dict(ckpt["model"])
-    if optimizer and "optimizer" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer"])
-    return ckpt.get("epoch", 0)
+def load_checkpoint(path: str):
+    """Load Keras model from .h5 file."""
+    from tensorflow.keras.models import load_model
+    return load_model(path)
 
 
 # ------------------------------------------------------------------ #

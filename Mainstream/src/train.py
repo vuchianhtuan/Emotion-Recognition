@@ -3,25 +3,18 @@ train.py
 --------
 Script huấn luyện và lưu mô hình EEG Emotion Recognition.
 
-Cách chạy:
-    # PSD/DE pipeline (PyTorch CNN/LSTM/Transformer)
-    python -m src.train --target valence --arch lstm --epochs 50
-
-    # MRMR pipeline (Bidirectional LSTM – khớp kiến trúc gốc DEAP)
-    python -m src.train --target arousal --feat mrmr --arch mrmr_lstm --data-dir data/raw --epochs 200
+Nâng cấp từ DEAP-Emotion-Recognition: Sử dụng TensorFlow/Keras để đảm bảo
+kết quả tương đương với pipeline gốc.
 """
 
 import argparse
 import os
 import pickle
 import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from sklearn.model_selection import train_test_split
 
-from .dataset          import DEAPDataset
-from .models           import build_model
-from .utils            import set_seed, save_checkpoint, plot_history
+from .models           import build_model, training
+from .utils            import plot_history
 from .mrmr_selection   import (
     preprocess_subject_fft,
     run_mrmr_selection,
@@ -69,21 +62,11 @@ def run_epoch(model, loader, criterion, optimizer, device, train: bool):
 
 
 # ------------------------------------------------------------------ #
-#  MRMR training pipeline
+#  MRMR training pipeline (Keras version)
 # ------------------------------------------------------------------ #
 def train_mrmr(args):
-    """Full MRMR training pipeline.
-
-    Steps:
-      1. Load all DEAP .dat files
-      2. Per-subject FFT preprocessing (5 bands, sliding window)
-      3. Per-subject MRMR channel selection
-      4. Build aggregated train / test split
-      5. Train EEGMRMRLSTMNet on the MRMR features
-    """
-    set_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[INFO] MRMR pipeline | Target: {args.target} | Device: {device}")
+    """Full MRMR training pipeline using Keras, matching DEAP exactly."""
+    print(f"[INFO] MRMR pipeline | Target: {args.target}")
 
     # ── 1. Load & preprocess ──────────────────────────────────────── #
     dat_files = sorted(f for f in os.listdir(args.data_dir) if f.endswith(".dat"))
@@ -133,52 +116,22 @@ def train_mrmr(args):
     print(f"[INFO] Train: {x_train.shape}, {y_train_bin.shape}")
     print(f"[INFO] Test : {x_test.shape},  {y_test_bin.shape}")
 
-    # ── 4. DataLoaders ────────────────────────────────────────────── #
-    train_ds = TensorDataset(
-        torch.tensor(x_train, dtype=torch.float32),
-        torch.tensor(y_train_bin, dtype=torch.long)
-    )
-    test_ds = TensorDataset(
-        torch.tensor(x_test, dtype=torch.float32),
-        torch.tensor(y_test_bin, dtype=torch.long)
-    )
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    test_loader  = DataLoader(test_ds,  batch_size=args.batch_size, shuffle=False)
+    # ── 4. Convert to one-hot for Keras ──────────────────────────── #
+    from tensorflow.keras.utils import to_categorical
+    y_train_cat = to_categorical(y_train_bin, num_classes=2)
+    y_test_cat = to_categorical(y_test_bin, num_classes=2)
 
-    # ── 5. Model ──────────────────────────────────────────────────── #
-    seq_len = x_train.shape[1]   # K * N_FREQ
-    model = build_model("mrmr_lstm", seq_len=seq_len).to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # ── 5. Train model ───────────────────────────────────────────── #
+    history, model = training(y_train_cat, y_test_cat, x_train, x_test, args.epochs)
 
-    history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
-    best_val_acc = 0.0
+    # ── 6. Save model ────────────────────────────────────────────── #
+    model_path = os.path.join(DEFAULT_MODEL_DIR, f"{args.target}_mrmr_lstm.h5")
+    model.save(model_path)
+    print(f"[INFO] Model saved → {model_path}")
 
-    for epoch in range(1, args.epochs + 1):
-        tr_loss, tr_acc = run_epoch(model, train_loader, criterion, optimizer, device, train=True)
-        va_loss, va_acc = run_epoch(model, test_loader,  criterion, None,      device, train=False)
-        scheduler.step()
-
-        history["train_loss"].append(tr_loss)
-        history["val_loss"].append(va_loss)
-        history["train_acc"].append(tr_acc)
-        history["val_acc"].append(va_acc)
-
-        print(f"Epoch {epoch:03d}/{args.epochs} | "
-              f"Train {tr_loss:.4f}/{tr_acc:.3f} | Val {va_loss:.4f}/{va_acc:.3f}")
-
-        if va_acc > best_val_acc:
-            best_val_acc = va_acc
-            ckpt_path = os.path.join(
-                DEFAULT_MODEL_DIR, f"{args.target}_mrmr_lstm_best.pth"
-            )
-            save_checkpoint(model, optimizer, epoch, ckpt_path)
-            print(f"  ✓ Saved checkpoint → {ckpt_path}")
-
-    plot_history(history, save_dir="reports/figures",
+    plot_history(history.history, save_dir="reports/figures",
                  title=f"{args.target.capitalize()} – MRMR LSTM")
-    print(f"\n[DONE] Best val acc: {best_val_acc:.4f}")
+    print(f"\n[DONE] Best val acc: {max(history.history['val_accuracy']):.4f}")
 
 
 # ------------------------------------------------------------------ #
@@ -236,7 +189,7 @@ def main(args):
     if args.feat == "mrmr":
         train_mrmr(args)
     else:
-        train_standard(args)
+        raise ValueError("Only 'mrmr' feat supported for DEAP compatibility")
 
 
 # ------------------------------------------------------------------ #

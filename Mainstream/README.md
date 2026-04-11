@@ -72,12 +72,6 @@ python -m src.train --target arousal --feat mrmr --data-dir data/raw --epochs 20
 python -m src.train --target valence --feat mrmr --data-dir data/raw --epochs 200
 ```
 
-#### Pipeline PSD/DE (CNN/LSTM/Transformer)
-```bash
-python -m src.train --target valence --arch lstm   --feat psd --epochs 50
-python -m src.train --target arousal --arch transformer --feat de --epochs 50
-```
-
 ### 4. Preprocess chuẩn DEAP (MNE) ra `data/processed/`
 
 Pipeline preprocess đã chuẩn hóa theo schema trung gian:
@@ -114,9 +108,6 @@ Mỗi `.npz` gồm:
 
 | Model | Mô tả | Dùng với |
 |---|---|---|
-| `EEGConvNet` | 1-D CNN trên trục kênh EEG | `--feat psd/de` |
-| `EEGLSTM` | Bidirectional LSTM, coi dải tần là time-step | `--feat psd/de` |
-| `EEGTransformer` | Transformer Encoder, coi kênh EEG là token | `--feat psd/de` |
 | `EEGMRMRLSTMNet` | **BiLSTM 5 tầng** – khớp kiến trúc DEAP gốc | `--feat mrmr` |
 
 ### Kiến trúc MRMR BiLSTM

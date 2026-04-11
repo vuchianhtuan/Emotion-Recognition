@@ -252,7 +252,7 @@ def preprocess_subject_for_mrmr(
     subject: dict[str, Any],
     config: PreprocessConfig | None = None,
 ) -> np.ndarray:
-    """Preprocess một subject DEAP thành meta array tương thích MRMR hiện tại."""
+    """Preprocess một subject DEAP thành meta array tương thích MRMR, matching DEAP exactly."""
     cfg = config or PreprocessConfig()
     n_trials = int(subject["data"].shape[0])
     meta = []
@@ -262,11 +262,15 @@ def preprocess_subject_for_mrmr(
         labels = np.asarray(subject["labels"][trial_idx][:2], dtype=np.float32)
         label_bin = (labels >= cfg.label_threshold).astype(np.int32)
 
-        cleaned = clean_eeg_trial_mne(trial, cfg)
+        # Skip MNE cleaning to match DEAP (raw FFT on original data)
         start = 0
-        while start + cfg.window_size <= cleaned.shape[1]:
-            window = cleaned[:, start: start + cfg.window_size]
-            feats = extract_fft_features(window, band=list(cfg.bands), fs=cfg.fs)
+        while start + cfg.window_size <= trial.shape[1]:
+            window = trial[:, start: start + cfg.window_size]
+            # Compute FFT per channel per band, matching DEAP FFT.py
+            feats = np.zeros((cfg.n_eeg_channels, len(cfg.bands) - 1))
+            for ch in range(cfg.n_eeg_channels):
+                powers = bin_power_fft(window[ch], list(cfg.bands), cfg.fs)
+                feats[ch] = powers
             meta.append(np.array([feats, label_bin], dtype=object))
             start += cfg.step_size
 

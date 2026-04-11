@@ -1,206 +1,134 @@
+
+
 """
 models.py
 ---------
-Định nghĩa kiến trúc mô hình phân loại cảm xúc từ EEG:
+Định nghĩa kiến trúc mô hình phân loại cảm xúc từ EEG.
 
-  1. EEGConvNet      – 1-D CNN trên trục kênh
-  2. EEGLSTM         – Bidirectional LSTM
-  3. EEGTransformer  – Lightweight Transformer Encoder
-  4. EEGMRMRLSTMNet  – Bidirectional LSTM cho pipeline MRMR
-                       (khớp với kiến trúc gốc DEAP-Emotion-Recognition)
+Sử dụng PyTorch để tương thích với training code trong app/main.py.
 """
 
 import torch
 import torch.nn as nn
 
 
-# ------------------------------------------------------------------ #
-#  1. 1-D CNN
-# ------------------------------------------------------------------ #
-class EEGConvNet(nn.Module):
+class MRMRLSTM(nn.Module):
     """
-    Input : (batch, channels=32, n_bands=4)
-    Output: (batch, num_classes)
+    BiLSTM model matching DEAP-Emotion-Recognition architecture.
+    
+    Args:
+        input_size: Number of features per time step
+        hidden_size: Hidden size for LSTM layers
+        num_layers: Number of LSTM layers
+        num_classes: Number of output classes (2 for binary classification)
+        dropout: Dropout rate
     """
-
-    def __init__(self, n_channels: int = 32, n_bands: int = 4,
-                 num_classes: int = 2, dropout: float = 0.3):
-        super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv1d(n_channels, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Conv1d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),
-        )
-        self.classifier = nn.Linear(128, num_classes)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 32, 4)
-        out = self.conv(x).squeeze(-1)      # (B, 128)
-        return self.classifier(out)
-
-
-# ------------------------------------------------------------------ #
-#  2. Bidirectional LSTM
-# ------------------------------------------------------------------ #
-class EEGLSTM(nn.Module):
-    """
-    Coi mỗi dải tần là 1 time-step, mỗi kênh là feature dim.
-    Input : (batch, n_bands=4, n_channels=32)
-    Output: (batch, num_classes)
-    """
-
-    def __init__(self, input_size: int = 32, hidden_size: int = 64,
-                 num_layers: int = 2, num_classes: int = 2,
-                 dropout: float = 0.3):
-        super().__init__()
+    
+    def __init__(self, input_size=1, hidden_size=128, num_layers=5, num_classes=2, dropout=0.5):
+        super(MRMRLSTM, self).__init__()
+        
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        
+        # Bidirectional LSTM layers with dropout
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
-            dropout=dropout if num_layers > 1 else 0,
             bidirectional=True,
+            dropout=dropout if num_layers > 1 else 0
         )
-        self.classifier = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size * 2, num_classes),
-        )
+        
+        # Additional dropout layers
+        self.dropout1 = nn.Dropout(0.6)
+        self.dropout2 = nn.Dropout(0.6)
+        self.dropout3 = nn.Dropout(0.6)
+        self.dropout4 = nn.Dropout(0.4)
+        
+        # Output layer
+        self.fc = nn.Linear(hidden_size * 2, num_classes)  # *2 for bidirectional
+        
+    def forward(self, x):
+        # x shape: (batch_size, seq_len, input_size)
+        
+        # LSTM layers with manual dropout application
+        out, _ = self.lstm(x)  # out: (batch_size, seq_len, hidden_size*2)
+        
+        # Apply dropout to LSTM outputs at different layers
+        # This approximates the original architecture
+        out = self.dropout1(out)
+        out = self.dropout2(out) 
+        out = self.dropout3(out)
+        out = self.dropout4(out)
+        
+        # Take the last time step output
+        out = out[:, -1, :]  # (batch_size, hidden_size*2)
+        
+        # Output layer
+        out = self.fc(out)  # (batch_size, num_classes)
+        return out
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x raw: (B, 32, 4) → transpose → (B, 4, 32)
-        x = x.permute(0, 2, 1)
-        out, _ = self.lstm(x)           # (B, 4, hidden*2)
-        out = out[:, -1, :]             # last time-step
-        return self.classifier(out)
 
-
-# ------------------------------------------------------------------ #
-#  3. Transformer Encoder
-# ------------------------------------------------------------------ #
-class EEGTransformer(nn.Module):
+def build_model(arch="mrmr_lstm", seq_len=None, dropout=0.5, input_size=1):
     """
-    Input : (batch, channels=32, n_bands=4)
-    Output: (batch, num_classes)
+    Build PyTorch model matching DEAP-Emotion-Recognition architecture.
 
-    Mỗi kênh EEG là 1 token với embedding dimension = n_bands.
+    Args:
+        arch: Model architecture (only 'mrmr_lstm' supported)
+        seq_len: Sequence length (not used, kept for compatibility)
+        dropout: Dropout rate
+        input_size: Number of features per time step
+
+    Returns:
+        PyTorch nn.Module
     """
+    if arch != "mrmr_lstm":
+        raise ValueError("Only 'mrmr_lstm' architecture supported for DEAP compatibility")
+    
+    model = MRMRLSTM(
+        input_size=input_size,
+        hidden_size=128,
+        num_layers=5,
+        num_classes=2,
+        dropout=dropout
+    )
+    
+    return model
+    model.add(Dropout(0.4))
 
-    def __init__(self, n_channels: int = 32, n_bands: int = 4,
-                 n_heads: int = 4, n_layers: int = 2,
-                 dim_feedforward: int = 128, num_classes: int = 2,
-                 dropout: float = 0.1):
-        super().__init__()
-        self.input_proj = nn.Linear(n_bands, 64)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=64, nhead=n_heads,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout, batch_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(64),
-            nn.Linear(64, num_classes),
-        )
+    model.add(Dense(units=16))
+    model.add(Activation('relu'))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 32, 4)
-        x = self.input_proj(x)          # (B, 32, 64)
-        x = self.encoder(x)             # (B, 32, 64)
-        x = x.mean(dim=1)               # global avg pooling trên token axis
-        return self.classifier(x)
+    model.add(Dense(units=2))
+    model.add(Activation("softmax"))
+
+    model.compile(optimizer="adam", loss=categorical_crossentropy, metrics=["accuracy"])
+    print(model.summary())
+    return model
 
 
-# ------------------------------------------------------------------ #
-#  4. Bidirectional LSTM for MRMR pipeline
-# ------------------------------------------------------------------ #
-class EEGMRMRLSTMNet(nn.Module):
-    """Bidirectional LSTM khớp với kiến trúc gốc DEAP-Emotion-Recognition.
-
-    Input : ``(batch, seq_len, 1)`` — seq_len = K_channels × N_freq_bands
-    Output: ``(batch, num_classes)``
-
-    Tầng LSTM giống nguyên bản TF/Keras:
-      BiLSTM(128) → LSTM(256) → LSTM(64) → LSTM(64) → LSTM(32) → Dense(16) → Dense(2)
+def training(y_train, y_test, x_train, x_test, epochs, batch_size=256):
     """
+    Train model matching DEAP-Emotion-Recognition training function.
 
-    def __init__(
-        self,
-        seq_len: int = 100,   # K=20 channels × 5 bands
-        num_classes: int = 2,
-        dropout: float = 0.5,
-    ):
-        super().__init__()
+    Args:
+        y_train, y_test: One-hot encoded labels
+        x_train, x_test: Input features
+        epochs: Number of training epochs
+        batch_size: Batch size
 
-        # Layer 1: Bidirectional LSTM (128 units → output 256)
-        self.bilstm = nn.LSTM(
-            input_size=1,
-            hidden_size=128,
-            num_layers=1,
-            batch_first=True,
-            bidirectional=True,
-        )
-        self.drop1 = nn.Dropout(dropout)
+    Returns:
+        Training history and trained model
+    """
+    model = build_model(input_shape=(x_train.shape[1], 1))
 
-        # Layer 2-5: Unidirectional LSTM stack
-        self.lstm2 = nn.LSTM(input_size=256, hidden_size=256, batch_first=True)
-        self.drop2 = nn.Dropout(dropout)
+    history = model.fit(
+        x_train, y_train,
+        epochs=epochs,
+        batch_size=batch_size,
+        verbose=1,
+        validation_data=(x_test, y_test)
+    )
 
-        self.lstm3 = nn.LSTM(input_size=256, hidden_size=64, batch_first=True)
-        self.drop3 = nn.Dropout(dropout)
-
-        self.lstm4 = nn.LSTM(input_size=64, hidden_size=64, batch_first=True)
-        self.drop4 = nn.Dropout(dropout)
-
-        self.lstm5 = nn.LSTM(input_size=64, hidden_size=32, batch_first=True)
-        self.drop5 = nn.Dropout(dropout * 0.7)  # original used 0.4 dropout here (≈ 0.5 × 0.7)
-
-        # Classifier head
-        self.fc = nn.Sequential(
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, num_classes),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, seq_len, 1)
-        out, _ = self.bilstm(x)             # (B, seq_len, 256)
-        out = self.drop1(out)
-
-        out, _ = self.lstm2(out)            # (B, seq_len, 256)
-        out = self.drop2(out)
-
-        out, _ = self.lstm3(out)            # (B, seq_len, 64)
-        out = self.drop3(out)
-
-        out, _ = self.lstm4(out)            # (B, seq_len, 64)
-        out = self.drop4(out)
-
-        out, _ = self.lstm5(out)            # (B, seq_len, 32)
-        out = self.drop5(out)
-
-        out = out[:, -1, :]                 # last time-step: (B, 32)
-        return self.fc(out)
-
-
-# ------------------------------------------------------------------ #
-#  Factory
-# ------------------------------------------------------------------ #
-MODEL_REGISTRY = {
-    "cnn":         EEGConvNet,
-    "lstm":        EEGLSTM,
-    "transformer": EEGTransformer,
-    "mrmr_lstm":   EEGMRMRLSTMNet,
-}
-
-
-def build_model(architecture: str = "lstm", **kwargs) -> nn.Module:
-    """Tạo mô hình theo tên. Truyền thêm kwargs cho constructor."""
-    if architecture not in MODEL_REGISTRY:
-        raise ValueError(f"Kiến trúc không hợp lệ: {architecture}. "
-                         f"Chọn trong: {list(MODEL_REGISTRY)}")
-    return MODEL_REGISTRY[architecture](**kwargs)
+    return history, model

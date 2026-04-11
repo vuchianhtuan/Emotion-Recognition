@@ -20,6 +20,7 @@ import io
 import os
 import pickle
 import sys
+import tempfile
 import time
 
 import matplotlib
@@ -33,6 +34,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import streamlit as st
 
+
+
 # Thêm thư mục gốc vào sys.path để import src
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -40,14 +43,16 @@ from src.models import build_model
 from src.mrmr_selection import (
     preprocess_subject_fft,
     run_mrmr_selection,
+    run_mrmr_global_selection,
     build_mrmr_dataset,
     prepare_for_lstm,
     BANDS,
     N_CHANNELS,
     N_FREQUENCIES,
     MRMR_COMPONENTS,
-)
-from src.preprocess import MRMR_BAND_NAMES
+    TEST_SPLIT_MODULO,
+)    
+from src.preprocess import MRMR_BAND_NAMES, PreprocessConfig
 from src.utils import save_checkpoint, load_checkpoint, plot_history, set_seed
 
 # ── Page config ──────────────────────────────────────────────────── #
@@ -72,15 +77,21 @@ DEAP_ELECTRODES = [
 def _init_state():
     defaults = {
         "page":                  "Home",
-        "subjects_raw":          [],   # list of (filename, subject_dict)
-        "subjects_preprocessed": [],   # list of np.ndarray from preprocess_subject_fft
-        "selected_channels":     [],   # list of channel lists per subject
+        "subjects_raw":          [],
+        "subjects_preprocessed": [],
+        "selected_channels":     [],
         "x_train": None, "y_train": None,
         "x_test":  None, "y_test":  None,
         "train_history":         None,
         "trained_model":         None,
         "trained_seq_len":       None,
         "classify_type":         "arousal",
+        
+        # --- THÊM 4 DÒNG NÀY VÀO ---
+        "pred_npy_results":      None,
+        "pred_dat_results":      None,
+        "pred_dat_n_trials":     None,
+        "pred_dat_acc":          None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -329,53 +340,57 @@ def page_mrmr():
     K = st.slider("Số kênh MRMR (K)", min_value=5, max_value=32, value=MRMR_COMPONENTS, step=1)
 
     if st.button("🔬 Chạy MRMR", type="primary"):
-        all_selected = []
-        bar = st.progress(0)
-        status = st.empty()
-        all_subjects_pre = st.session_state.subjects_preprocessed
-
-        for i, preprocessed in enumerate(all_subjects_pre):
-            fname = st.session_state.subjects_raw[i][0] if i < len(st.session_state.subjects_raw) else f"Subject {i+1}"
-            status.text(f"⏳ MRMR trên {fname} ({i+1}/{len(all_subjects_pre)})…")
-            selected = run_mrmr_selection(preprocessed, classify_type=classify_type, K=K)
-            all_selected.append(selected)
-            bar.progress((i + 1) / len(all_subjects_pre))
-
-        st.session_state.selected_channels = all_selected
-        status.text("✅ Hoàn thành!")
-        st.success(f"Đã chọn {K} kênh cho {len(all_selected)} subject(s).")
+        with st.spinner("Đang chạy MRMR Global trên tất cả subjects..."):
+            all_subjects_pre = st.session_state.subjects_preprocessed
+            global_selected = run_mrmr_global_selection(all_subjects_pre, classify_type=classify_type, K=K)
+            
+        # Lưu cùng channels cho tất cả subjects
+        st.session_state.selected_channels = [global_selected] * len(all_subjects_pre)
+        st.success(f"✅ Đã chọn {K} kênh Global cho tất cả {len(all_subjects_pre)} subjects.")
+        st.info(f"📋 Global channels: {', '.join([DEAP_ELECTRODES[c] for c in global_selected])}")
 
     if st.session_state.selected_channels:
         st.markdown("---")
-        st.subheader("📊 Kênh được chọn")
+        st.subheader("📊 Kênh được chọn (Global)")
 
+        # Tất cả subjects có cùng channels
+        global_channels = st.session_state.selected_channels[0]
+        ch_names = [DEAP_ELECTRODES[c] for c in global_channels if c < len(DEAP_ELECTRODES)]
+        
+        st.markdown(f"**Selected {len(global_channels)} channels for all subjects:**")
+        st.markdown(f"**Names:** {', '.join(ch_names)}")
+        st.markdown(f"**Indices:** {global_channels}")
+
+        # Hiển thị bảng cho tất cả subjects
         rows = []
-        for i, ch_list in enumerate(st.session_state.selected_channels):
+        for i in range(len(st.session_state.subjects_preprocessed)):
             fname = (st.session_state.subjects_raw[i][0]
-                     if i < len(st.session_state.subjects_raw) else f"Sub {i+1}")
-            ch_names = [DEAP_ELECTRODES[c] for c in ch_list if c < len(DEAP_ELECTRODES)]
+                     if i < len(st.session_state.subjects_raw) else f"Subject {i+1}")
             rows.append({"Subject": fname, "Selected channels": ", ".join(ch_names),
-                         "Count": len(ch_list)})
+                         "Count": len(global_channels)})
 
         df = pd.DataFrame(rows)
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # Frequency of channel selection across subjects
-        from collections import Counter
-        all_flat = [ch for chl in st.session_state.selected_channels for ch in chl]
-        counts = Counter(all_flat)
-        ch_freq = pd.DataFrame(
-            [(DEAP_ELECTRODES[k], v) for k, v in sorted(counts.items(), key=lambda x: -x[1])],
-            columns=["Channel", "Frequency"],
+        # ─── Download channels file ─────────────────────────────── #
+        st.markdown("---")
+        st.subheader("💾 Xuất file kênh được chọn")
+        
+        channels_df = pd.DataFrame({
+            "channels": global_channels,
+            "channel_names": ch_names,
+        })
+        
+        csv_buffer = channels_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Tải file kênh (CSV)",
+            data=csv_buffer,
+            file_name=f"mrmr_global_channels_{classify_type}.csv",
+            mime="text/csv",
+            key="download_channels",
         )
-        fig, ax = plt.subplots(figsize=(10, 3))
-        ax.bar(ch_freq["Channel"], ch_freq["Frequency"], color="#5b8dd9")
-        ax.set_xlabel("EEG Channel")
-        ax.set_ylabel("Số lần được chọn")
-        ax.set_title("Tần suất lựa chọn kênh qua các subject")
-        plt.xticks(rotation=45, ha="right", fontsize=8)
-        st.pyplot(fig)
-        plt.close(fig)
+        
+        st.info(f"📋 Global channels ({len(global_channels)}): {', '.join(ch_names)}")
 
         st.button("Tiếp tục → Train Model", on_click=goto, args=("Train Model",))
 
@@ -425,7 +440,7 @@ def page_train():
 
         seq_len = x_train.shape[1]
         device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model   = build_model("mrmr_lstm", seq_len=seq_len, dropout=dropout).to(device)
+        model   = build_model("mrmr_lstm", seq_len=seq_len, dropout=dropout, input_size=1).to(device)
 
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=float(lr))
@@ -568,15 +583,37 @@ def page_predict():
         ckpt_file = st.file_uploader("Upload checkpoint (.pth)", type=["pth"])
         classify_type = st.selectbox("Nhãn của mô hình", ["arousal", "valence"])
         if ckpt_file:
-            buf = io.BytesIO(ckpt_file.read())
-            ckpt = torch.load(buf, map_location="cpu")
-            seq_len = ckpt.get("seq_len", 100)
-            model = build_model("mrmr_lstm", seq_len=seq_len)
-            model.load_state_dict(ckpt["model"])
-            st.success("✅ Checkpoint loaded.")
+            try:
+                checkpoint = torch.load(io.BytesIO(ckpt_file.read()), map_location="cpu")
+                model = build_model("mrmr_lstm", input_size=1)
+                model.load_state_dict(checkpoint["model"])
+                model.eval()
+                st.success("✅ Checkpoint `.pth` loaded.")
+                classify_type = checkpoint.get("target", classify_type)
+                if "target" in checkpoint:
+                    st.info(f"Model target loaded: {classify_type}")
+            except Exception as exc:
+                st.error(f"Không thể load checkpoint: {exc}")
 
     st.markdown("---")
     st.subheader("📤 Upload dữ liệu để dự đoán")
+
+    # ─── Upload channels file (mới) ──────────────────────────────── #
+    st.markdown("**📋 File kênh được chọn (Optional)**")
+    st.info("Tải file kênh từ MRMR Selection để áp dụng cùng kênh được dùng khi training")
+    
+    channels_file = st.file_uploader("Upload file kênh CSV (mrmr_global_channels_*.csv)", type=["csv"], key="upload_channels")
+    selected_channels_from_file = None
+    
+    if channels_file:
+        channels_df = pd.read_csv(channels_file)
+        if "channels" in channels_df.columns:
+            selected_channels_from_file = channels_df["channels"].tolist()
+            st.success(f"✅ Loaded {len(selected_channels_from_file)} channels: {', '.join([DEAP_ELECTRODES[int(c)] for c in selected_channels_from_file if int(c) < len(DEAP_ELECTRODES)])}")
+        else:
+            st.warning("⚠️ File không đúng format. Cần có cột 'channels'")
+
+    st.markdown("---")
 
     input_mode = st.radio(
         "Kiểu dữ liệu đầu vào",
@@ -587,52 +624,185 @@ def page_predict():
     if input_mode == "File đặc trưng MRMR (.npy)":
         npy_file = st.file_uploader("Upload file .npy (shape: [n_samples, seq_len, 1])", type=["npy"])
         if npy_file and model is not None:
-            features = np.load(io.BytesIO(npy_file.read()))
-            st.write(f"Shape: `{features.shape}`")
-            _run_prediction(model, features, classify_type)
+            # 1. NÚT BẤM DỰ ĐOÁN CHO FILE NPY
+            if st.button("🚀 Bắt đầu dự đoán .npy", type="primary"):
+                with st.spinner("Đang dự đoán..."):
+                    features = np.load(io.BytesIO(npy_file.read()))
+                    probs, preds = _predict_model(model, features)
+                    # Lưu vào session_state
+                    st.session_state.pred_npy_results = {
+                        "features_shape": features.shape,
+                        "probs": probs,
+                        "preds": preds
+                    }
+                        
+            # 2. HIỂN THỊ KẾT QUẢ CHO FILE NPY
+            if st.session_state.get("pred_npy_results") is not None:
+                res = st.session_state.pred_npy_results
+                st.write(f"Shape: `{res['features_shape']}`")
+                st.metric("Samples", res['features_shape'][0])
+                
+                # Việc kéo slider ở đây sẽ không làm code phía trên chạy lại
+                sample_idx = st.slider("Chọn sample index", 1, res['features_shape'][0], 1)
+                selected = sample_idx - 1
+                
+                st.markdown("---")
+                st.subheader("🔎 Sample prediction")
+                st.write({
+                    "Sample index": selected,
+                    "Prediction": _label_name(res['preds'][selected]),
+                    "P(Low)": float(res['probs'][selected, 0]),
+                    "P(High)": float(res['probs'][selected, 1]),
+                })
+                st.markdown("---")
+                st.write("Lưu ý: file .npy không chứa nhãn thực tế, chỉ hiển thị dự đoán từng sample.")
 
     else:
-        dat_file = st.file_uploader("Upload file .dat", type=["dat"])
-        if dat_file and model is not None and st.session_state.selected_channels:
-            subj = pickle.load(io.BytesIO(dat_file.read()), encoding="latin1")
-            with st.spinner("Preprocessing…"):
-                preprocessed = preprocess_subject_fft(subj)
-                # Use first subject's selected channels as reference
+        dat_file = st.file_uploader("Upload file .dat", type=["dat"], key="upload_dat")
+        if dat_file and model is not None:
+            # Xác định channels để sử dụng
+            if selected_channels_from_file:
+                selected = selected_channels_from_file
+                st.info(f"📌 Sử dụng {len(selected)} kênh từ file upload")
+            elif st.session_state.selected_channels:
                 selected = st.session_state.selected_channels[0]
-                x_r, y_r, x_t, y_t = build_mrmr_dataset([preprocessed], [selected])
-                all_x = np.concatenate([x_r, x_t], axis=0)
-                all_y = np.concatenate([y_r, y_t], axis=0)
-                # For inference: fit scaler on full data (no train/test split needed)
-                from sklearn.preprocessing import normalize as _normalize, StandardScaler as _SS
-                all_x_norm = _normalize(all_x).astype(np.float32)
-                scaler = _SS()
-                all_x_scaled = scaler.fit_transform(all_x_norm).astype(np.float32)
-                x_norm = all_x_scaled.reshape(all_x_scaled.shape[0], all_x_scaled.shape[1], 1)
-                col = 0 if classify_type.lower() == "arousal" else 1
-                y_bin = all_y[:, col]
+                st.info(f"📌 Sử dụng {len(selected)} kênh từ MRMR Selection hiện tại")
+            else:
+                st.warning("⚠️ Chưa có thông tin kênh. Hãy tải file kênh hoặc chạy MRMR Selection trước.")
+                return
+            
+            # 1. NÚT BẤM TIỀN XỬ LÝ & DỰ ĐOÁN CHO FILE DAT
+            if st.button("🚀 Tiền xử lý & Dự đoán file .dat", type="primary"):
+                with st.spinner("Đang Preprocessing & Predicting (Có thể mất thời gian)…"):
+                    subj = pickle.load(io.BytesIO(dat_file.read()), encoding="latin1")
+                    preprocessed = preprocess_subject_fft(subj)
+                    x_r, y_r, x_t, y_t = build_mrmr_dataset([preprocessed], [selected])
+                    all_x = np.concatenate([x_r, x_t], axis=0)
+                    all_y = np.concatenate([y_r, y_t], axis=0)
+                    
+                    from sklearn.preprocessing import normalize as _normalize, StandardScaler as _SS
+                    all_x_norm = _normalize(all_x).astype(np.float32)
+                    scaler = _SS()
+                    all_x_scaled = scaler.fit_transform(all_x_norm).astype(np.float32)
+                    x_norm = all_x_scaled.reshape(all_x_scaled.shape[0], all_x_scaled.shape[1], 1)
+                    col = 0 if classify_type.lower() == "arousal" else 1
+                    y_bin = all_y[:, col]
 
-            st.write(f"Shape sau xử lý: `{x_norm.shape}`")
-            _run_prediction(model, x_norm, classify_type, true_labels=y_bin)
+                    trial_ids, window_ids, start_samples = _build_window_metadata(subj)
+                    train_mask = np.array([i % TEST_SPLIT_MODULO != 0 for i in range(len(trial_ids))])
+                    trial_ids = np.concatenate([trial_ids[train_mask], trial_ids[~train_mask]])
+                    window_ids = np.concatenate([window_ids[train_mask], window_ids[~train_mask]])
+                    start_samples = np.concatenate([start_samples[train_mask], start_samples[~train_mask]])
 
-        elif dat_file and model is not None and not st.session_state.selected_channels:
-            st.warning("⚠️ Chưa có kết quả MRMR channel selection. Hãy chạy MRMR Selection trước.")
+                    probs, preds = _predict_model(model, x_norm)
+                    total_acc = (preds == y_bin).mean()
 
+                    # Build results dataframe
+                    df_results = pd.DataFrame({
+                        "trial": trial_ids,
+                        "window": window_ids,
+                        "start_sample": start_samples,
+                        "prediction": [ _label_name(p) for p in preds ],
+                        "true_label": [ _label_name(y) for y in y_bin ],
+                        "p_low": probs[:, 0],
+                        "p_high": probs[:, 1],
+                    })
 
+                    # Lưu vào session_state để tái sử dụng
+                    st.session_state.pred_dat_results = df_results
+                    st.session_state.pred_dat_n_trials = int(subj["data"].shape[0])
+                    st.session_state.pred_dat_acc = total_acc
+
+            # 2. HIỂN THỊ KẾT QUẢ TỪ SESSION_STATE VÀ KHỞI TẠO SLIDERS CHO FILE DAT
+            if st.session_state.get("pred_dat_results") is not None:
+                df_results = st.session_state.pred_dat_results
+                total_acc = st.session_state.pred_dat_acc
+                n_trials = st.session_state.pred_dat_n_trials
+
+                st.write(f"Số mẫu sau xử lý: `{len(df_results)}`")
+                st.metric("Overall Accuracy (Tất cả trials)", f"{total_acc:.3%}")
+                
+                st.markdown("---")
+                st.subheader("📌 Dự đoán theo Trial")
+
+                # Từ đây kéo slider thì Streamlit chỉ chạy lại từ đây trở xuống
+                trial_choice = st.slider("Chọn trial để xem chi tiết", 1, n_trials, 1)
+                trial_mask = df_results["trial"] == (trial_choice - 1)
+                trial_df = df_results[trial_mask].reset_index(drop=True)
+
+                if not trial_df.empty:
+                    # ─── TÍNH TOÁN KẾT QUẢ TỔNG QUAN CỦA TRIAL ───
+                    true_label = trial_df["true_label"].iloc[0] # Nhãn thực tế của cả trial
+                    total_samples = len(trial_df)
+                    
+                    # Đếm số lượng dự đoán High / Low
+                    preds_counts = trial_df["prediction"].value_counts()
+                    pred_high = preds_counts.get("High", 0)
+                    pred_low = preds_counts.get("Low", 0)
+                    
+                    # Dự đoán của Trial (Majority Vote)
+                    trial_prediction = "High" if pred_high >= pred_low else "Low"
+                    is_correct = (trial_prediction == true_label)
+                    
+                    # Đếm chính xác số lượng sample đoán đúng
+                    correct_samples = (trial_df["prediction"] == trial_df["true_label"]).sum()
+                    
+                    # Tỉ lệ sample dự đoán đúng trong Trial này
+                    trial_acc = correct_samples / total_samples if total_samples > 0 else 0.0
+
+                    # ─── HIỂN THỊ KẾT QUẢ TỔNG QUAN BẰNG COLUMNS ───
+                    st.markdown(f"**📊 Kết quả tổng hợp Trial {trial_choice}**")
+                    
+                    # Đặt màu sắc thông báo
+                    if is_correct:
+                        st.success(f"✅ Dự đoán Trial **CHÍNH XÁC**! (Dự đoán: {trial_prediction} | Thực tế: {true_label})")
+                    else:
+                        st.error(f"❌ Dự đoán Trial **SAI**! (Dự đoán: {trial_prediction} | Thực tế: {true_label})")
+
+                    # Chia làm 4 cột để hiển thị rõ Số sample đúng / Tổng số
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("Nhãn thực tế", true_label)
+                    col2.metric("Dự đoán (Đa số)", trial_prediction)
+                    col3.metric("Sample dự đoán đúng", f"{correct_samples} / {total_samples}")
+                    col4.metric("Tỉ lệ (Accuracy)", f"{trial_acc:.2%}")
+
+                    st.write(f"*Chi tiết bầu chọn:* Có **{pred_high}** mẫu đoán `High` và **{pred_low}** mẫu đoán `Low`.")
+
+                    # ─── CHI TIẾT TỪNG SAMPLE (Dành cho việc phân tích sâu) ───
+                    st.markdown("---")
+                    st.markdown("**🔎 Xem chi tiết từng Sample (Window) trong Trial**")
+                    sample_choice = st.slider("Chọn sample", 1, len(trial_df), 1)
+                    selected_row = trial_df.iloc[sample_choice - 1]
+                    
+                    st.write({
+                        "Trial": int(selected_row["trial"]) + 1,
+                        "Window index": int(selected_row["window"]),
+                        "Start sample": int(selected_row["start_sample"]),
+                        "Prediction": selected_row["prediction"],
+                        "True label": selected_row["true_label"],
+                        "P(Low)": float(selected_row["p_low"]),
+                        "P(High)": float(selected_row["p_high"]),
+                    })
+
+                    with st.expander(f"Hiển thị bảng dữ liệu của trial {trial_choice}"):
+                        st.dataframe(trial_df, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("Không có window nào cho trial đã chọn.")
 def _run_prediction(model, x: np.ndarray, classify_type: str, true_labels=None):
     """Helper: run model on x and display results."""
-    model.eval()
-    device = next(model.parameters()).device
-
-    # Ensure correct shape
+    # Ensure correct shape for models expecting (n, seq, 1)
     if x.ndim == 2:
-        x = x[:, :, np.newaxis]  # (n, seq, 1)
+        x = x[:, :, np.newaxis]
 
-    x_tensor = torch.tensor(x, dtype=torch.float32).to(device)
-
+    model.eval()
+    x_tensor = torch.from_numpy(x.astype(np.float32))
+    device = next(model.parameters()).device if any(p.requires_grad for p in model.parameters()) else torch.device("cpu")
+    x_tensor = x_tensor.to(device)
     with torch.no_grad():
         logits = model(x_tensor)
-        probs  = torch.softmax(logits, dim=-1).cpu().numpy()
-        preds  = probs.argmax(axis=1)
+        probs = torch.softmax(logits, dim=1).cpu().numpy()
+
+    preds = probs.argmax(axis=1)
 
     labels_map = {0: "Low", 1: "High"}
     st.markdown("---")
@@ -659,6 +829,52 @@ def _run_prediction(model, x: np.ndarray, classify_type: str, true_labels=None):
         df_pred["True Label"] = [labels_map.get(int(l), str(l)) for l in true_labels]
 
     st.dataframe(df_pred.head(50), use_container_width=True, hide_index=True)
+
+
+def _predict_model(model, x: np.ndarray):
+    """Run model inference and return probabilities and class predictions."""
+    if x.ndim == 2:
+        x = x[:, :, np.newaxis]
+
+    model.eval()
+    x_tensor = torch.from_numpy(x.astype(np.float32))
+    device = next(model.parameters()).device if any(p.requires_grad for p in model.parameters()) else torch.device("cpu")
+    x_tensor = x_tensor.to(device)
+    
+    with torch.no_grad():
+        logits = model(x_tensor)
+        probs = torch.softmax(logits, dim=1).cpu().numpy()
+
+    preds = probs.argmax(axis=1)
+    return probs, preds
+
+def _build_window_metadata(subject):
+    """Build trial and window metadata for DEAP .dat data."""
+    cfg = PreprocessConfig()
+    trial_ids = []
+    window_ids = []
+    start_samples = []
+
+    for trial_idx in range(subject["data"].shape[0]):
+        trial = np.asarray(subject["data"][trial_idx], dtype=np.float32)[: cfg.n_eeg_channels]
+        window_idx = 0
+        start = 0
+        while start + cfg.window_size <= trial.shape[1]:
+            trial_ids.append(trial_idx)
+            window_ids.append(window_idx)
+            start_samples.append(start)
+            window_idx += 1
+            start += cfg.step_size
+
+    return (
+        np.array(trial_ids, dtype=np.int32),
+        np.array(window_ids, dtype=np.int32),
+        np.array(start_samples, dtype=np.int32),
+    )
+
+
+def _label_name(value):
+    return "High" if int(value) == 1 else "Low"
 
 
 # ═══════════════════════════════════════════════════════════════════ #

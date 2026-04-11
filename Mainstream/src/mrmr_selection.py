@@ -3,20 +3,8 @@ mrmr_selection.py
 -----------------
 MRMR (Minimum Redundancy Maximum Relevance) channel selection for EEG signals.
 
-This module is a modern Python conversion of:
-  DEAP-Emotion-Recognition/FeatureExtraction/MRMR.py
-
-Key changes from original:
-  - pyeeg.bin_power replaced by numpy FFT (bin_power_fft)
-  - MRMR implemented using scikit-learn mutual_info_classif
-    (replaces the external mrmr-py dependency for wider compatibility)
-  - Compatible with PyTorch-based training pipeline in Mainstream
-
-Pipeline:
-  1. Sliding-window FFT on each DEAP .dat subject
-  2. MRMR channel selection per subject
-  3. Build flattened train / test arrays
-  4. Normalize for LSTM input
+Upgraded from DEAP-Emotion-Recognition: Use sklearn for MRMR implementation
+to ensure compatibility and avoid dependency issues.
 """
 
 from __future__ import annotations
@@ -25,10 +13,22 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import mrmr
+from tqdm import tqdm
 from sklearn.feature_selection import mutual_info_classif
-from sklearn.preprocessing import StandardScaler, normalize
+from sklearn.preprocessing import normalize, StandardScaler
 
-from .preprocess import PreprocessConfig, preprocess_subject_for_mrmr
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pickle
+import mrmr
+from tqdm import tqdm
+from sklearn.feature_selection import mutual_info_classif
+from sklearn.preprocessing import normalize, StandardScaler
+
+from .preprocess import PreprocessConfig, preprocess_subject_for_mrmr, bin_power_fft
 
 
 # ─────────────────────────── Constants ────────────────────────────────────── #
@@ -42,6 +42,67 @@ STEP_SIZE: int = 16                           # Sliding step
 MRMR_COMPONENTS: int = 20                    # Default top-K channels
 LABEL_THRESHOLD: int = 5                     # Valence/Arousal score ≥ threshold → High
 TEST_SPLIT_MODULO: int = 4                   # Every N-th window goes to test set (25%)
+
+
+# ─────────────────────────── Paths ────────────────────────────────────────── #
+
+RAW_DATA_PATH = Path("data") / "raw"
+SAVE_MRMR_CHANNELS_PATH = Path("data") / "saved_trained_mrmr_channels"
+FINAL_DATASET_PATH_MRMR = Path("data") / "final_deap_dataset_mrmr"
+
+
+# ─────────────────────────── Data Loading ─────────────────────────────────── #
+
+def load_subject(participant_id: int) -> dict:
+    """Load DEAP subject data from .dat file."""
+    filename = f"s{participant_id:02d}.dat"
+    filepath = RAW_DATA_PATH / filename
+    if not filepath.exists():
+        raise FileNotFoundError(f"Data file not found: {filepath}")
+    with open(filepath, 'rb') as f:
+        subject = pickle.load(f, encoding="latin1")
+    return subject
+
+
+def preprocess_subject_global(subject: dict, classify_type: str = "arousal") -> Tuple[np.ndarray, np.ndarray]:
+    """Preprocess subject for global MRMR: return (features, labels) for all windows."""
+    # Sử dụng preprocess_subject_for_mrmr hoặc implement đơn giản
+    cfg = PreprocessConfig()
+    # Giả sử preprocess_subject_for_mrmr trả về array (n_windows, 2) với [features, labels]
+    # Nhưng cần sửa để trả về (features, labels)
+
+    # Implement đơn giản như trong test_mrmr.py
+    meta = []
+    for i in range(40):  # 40 trials
+        data = subject["data"][i]
+        labels = subject["labels"][i][:2]
+        start = 0
+        while start + WINDOW_SIZE < data.shape[1]:
+            meta_array = []
+            meta_data = []
+            for j in range(N_CHANNELS):
+                x = data[j][start: start + WINDOW_SIZE]
+                y = bin_power_fft(x, band=BANDS, fs=SAMPLING_RATE)
+                meta_data.append(np.array(y[0]))  # list of 5 floats
+            meta_array.append(np.stack(meta_data, axis=0))  # (32, 5)
+            label_bin = np.array(labels >= LABEL_THRESHOLD).astype(int)
+            meta_array.append(label_bin)
+            meta.append(np.array(meta_array, dtype=object))
+            start += STEP_SIZE
+
+    # Extract features and labels
+    n_windows = len(meta)
+    features = np.array([meta[i][0] for i in range(n_windows)])  # (n_windows, 32, 5)
+    labels = np.array([meta[i][1] for i in range(n_windows)])    # (n_windows, 2)
+
+    # Reshape features to (n_windows, 32*5) or keep as is
+    features = features.reshape(n_windows, -1)  # (n_windows, 160)
+
+    # Labels: valence or arousal
+    label_idx = 0 if classify_type == "valence" else 1
+    labels = labels[:, label_idx]
+
+    return features, labels
 
 
 # ───────────────────── FFT band-power (pyeeg replacement) ─────────────────── #
@@ -79,13 +140,9 @@ def bin_power_fft(
 # ───────────────────── MRMR implementation ────────────────────────────────── #
 
 def _mrmr_classif(X: np.ndarray, y: np.ndarray, K: int) -> List[int]:
-    """Greedy MRMR channel selection using scikit-learn mutual information.
+    """Greedy MRMR channel selection using optimized mrmr library.
 
-    At each step selects the feature ``f`` that maximises::
-
-        score(f) = MI(f, y) - (1 / |S|) * sum(MI(f, s) for s in S)
-
-    where ``S`` is the already-selected feature set.
+    Uses the mrmr library which supports multi-core processing.
 
     Args:
         X: Feature matrix of shape ``(n_samples, n_features)``.
@@ -95,50 +152,127 @@ def _mrmr_classif(X: np.ndarray, y: np.ndarray, K: int) -> List[int]:
     Returns:
         List of ``K`` selected feature (column) indices.
     """
-    from sklearn.feature_selection import mutual_info_regression
-
-    n_features = X.shape[1]
-    K = min(K, n_features)
-
-    # Relevance: MI(feature_i, target) — target is discrete class label
-    relevance = mutual_info_classif(X, y, discrete_features=False, random_state=42)
-
-    selected: List[int] = []
-    remaining = list(range(n_features))
-
-    for _ in range(K):
-        if not selected:
-            # First feature: pick highest relevance
-            best = int(np.argmax(relevance))
-            selected.append(best)
-            remaining.remove(best)
-            continue
-
-        # Redundancy: average MI between candidate and already-selected features
-        # Feature-feature MI uses mutual_info_regression (both continuous)
-        best_score = -np.inf
-        best_feat = remaining[0]
-
-        for feat in remaining:
-            red = np.mean([
-                mutual_info_regression(
-                    X[:, [feat]], X[:, s],
-                    discrete_features=False, random_state=42,
-                ).item()
-                for s in selected
-            ])
-            score = relevance[feat] - red
-            if score > best_score:
-                best_score = score
-                best_feat = feat
-
-        selected.append(best_feat)
-        remaining.remove(best_feat)
-
-    return selected
+    # Convert to pandas
+    X_df = pd.DataFrame(X)
+    y_series = pd.Series(y)
+    
+    # Use optimized mrmr library with multi-core and progress bar
+    selected_features = mrmr.mrmr_classif(
+        X_df, y_series, K=K, 
+        n_jobs=-1,  # Use all CPU cores
+        show_progress=True
+    )
+    
+    # Convert feature names back to indices
+    selected_indices = [int(feat) for feat in selected_features]
+    return selected_indices
 
 
-# ───────────────────── Per-subject FFT preprocessing ─────────────────────── #
+# ─────────────────────────── Global MRMR ──────────────────────────────────── #
+
+def use_mrmr_global(participant_list=range(1, 33), components=20, classify_type: str = "Arousal"):
+    """Global MRMR: Select channels once on all participants combined."""
+    print(f"Run Global MRMR channel selection with {classify_type} to select {components} channels")
+
+    # Paths
+    save_path_data_training = FINAL_DATASET_PATH_MRMR / "data_training.npy"
+    save_path_label_training = FINAL_DATASET_PATH_MRMR / "label_training.npy"
+    save_path_data_testing = FINAL_DATASET_PATH_MRMR / "data_testing.npy"
+    save_path_label_testing = FINAL_DATASET_PATH_MRMR / "label_testing.npy"
+    channels_file = SAVE_MRMR_CHANNELS_PATH / f"mrmr_global_channels_{classify_type}.csv"
+
+    FINAL_DATASET_PATH_MRMR.mkdir(exist_ok=True, parents=True)
+    SAVE_MRMR_CHANNELS_PATH.mkdir(exist_ok=True, parents=True)
+
+    # 1. Gộp tất cả data từ tất cả participants
+    print("Step 1: Loading and combining data from all participants...")
+    all_features = []
+    all_labels = []
+
+    for participant in tqdm(participant_list, desc="Loading participants"):
+        subject = load_subject(participant)
+        features, labels = preprocess_subject_global(subject, classify_type.lower())
+        all_features.append(features)
+        all_labels.append(labels)
+
+    # Gộp
+    all_features = np.vstack(all_features)  # (total_windows, 160)
+    all_labels = np.concatenate(all_labels)  # (total_windows,)
+
+    print(f"Combined data shape: {all_features.shape}, labels shape: {all_labels.shape}")
+
+    # 2. Chạy MRMR trên toàn bộ data
+    print("Step 2: Running MRMR on combined data...")
+    selected_indices = _mrmr_classif(all_features, all_labels, K=components)
+
+    # 3. Lưu selected channels
+    print(f"Step 3: Saving selected channels to {channels_file}")
+    pd.DataFrame({"channels": selected_indices}).to_csv(channels_file, index=False)
+
+    # 4. Áp dụng selected channels cho từng participant
+    print("Step 4: Applying selected channels to each participant...")
+    x_train = []
+    y_train = []
+    x_test = []
+    y_test = []
+
+    for participant in tqdm(participant_list, desc="Applying channels"):
+        subject = load_subject(participant)
+        features, labels = preprocess_subject_global(subject, classify_type.lower())
+
+        # Filter channels: giả sử features (n_windows, 160), reshape về (n_windows, 32, 5), filter, flatten lại
+        features_reshaped = features.reshape(-1, 32, N_FREQUENCIES)  # (n_windows, 32, 5)
+        features_filtered = features_reshaped[:, selected_indices, :]  # (n_windows, components, 5)
+        features_filtered = features_filtered.reshape(-1, components * N_FREQUENCIES)  # (n_windows, components*5)
+
+        # Chia train/test
+        for i in range(len(features_filtered)):
+            if i % TEST_SPLIT_MODULO == 0:
+                x_test.append(features_filtered[i])
+                y_test.append(labels[i])
+            else:
+                x_train.append(features_filtered[i])
+                y_train.append(labels[i])
+
+    # 5. Lưu dataset
+    print("Step 5: Saving filtered dataset...")
+    np.save(save_path_data_training, np.array(x_train), allow_pickle=True, fix_imports=True)
+    np.save(save_path_label_training, np.array(y_train), allow_pickle=True, fix_imports=True)
+    np.save(save_path_data_testing, np.array(x_test), allow_pickle=True, fix_imports=True)
+    np.save(save_path_label_testing, np.array(y_test), allow_pickle=True, fix_imports=True)
+
+    print("Global MRMR completed. Dataset saved with selected channels.")
+
+
+# ─────────────────────────── Legacy per-subject MRMR ─────────────────────── #
+
+def use_mrmr(participant_list=range(1, 33), components=20, classify_type: str = "Arousal"):
+    """Legacy: Per-subject MRMR (giữ để tương thích). Now calls global MRMR."""
+    use_mrmr_global(participant_list, components, classify_type)
+
+
+def load_selected_channels(classify_type: str = "arousal") -> List[int]:
+    """Load selected channels from global MRMR file."""
+    channels_file = SAVE_MRMR_CHANNELS_PATH / f"mrmr_global_channels_{classify_type}.csv"
+    if not channels_file.exists():
+        raise FileNotFoundError(f"Channels file not found: {channels_file}")
+    df = pd.read_csv(channels_file)
+    return df["channels"].tolist()
+
+
+def filter_channels(features: np.ndarray, selected_channels: List[int], n_frequencies: int = N_FREQUENCIES) -> np.ndarray:
+    """Filter features to keep only selected channels."""
+    # features: (n_windows, 32 * n_frequencies)
+    features_reshaped = features.reshape(-1, 32, n_frequencies)  # (n_windows, 32, n_frequencies)
+    features_filtered = features_reshaped[:, selected_channels, :]  # (n_windows, len(selected_channels), n_frequencies)
+    return features_filtered.reshape(-1, len(selected_channels) * n_frequencies)  # (n_windows, len(selected_channels) * n_frequencies)
+
+
+def preprocess_and_filter_new_data(subject: dict, selected_channels: List[int], classify_type: str = "arousal") -> Tuple[np.ndarray, np.ndarray]:
+    """Preprocess new subject data and filter to selected channels for prediction."""
+    features, labels = preprocess_subject_global(subject, classify_type)
+    features_filtered = filter_channels(features, selected_channels)
+    return features_filtered, labels
 
 def preprocess_subject_fft(
     subject: dict,
@@ -219,6 +353,59 @@ def run_mrmr_selection(
         y = np.repeat(labels[:, 1], N_FREQUENCIES)
 
     selected = _mrmr_classif(x, y.astype(int), K=K)
+    return selected
+
+
+def run_mrmr_global_selection(
+    all_subjects_preprocessed: List[np.ndarray],
+    classify_type: str = "arousal",
+    K: int = MRMR_COMPONENTS,
+) -> List[int]:
+    """Run global MRMR channel selection on all preprocessed subjects combined.
+
+    Args:
+        all_subjects_preprocessed: List of preprocessed data arrays from preprocess_subject_fft.
+        classify_type: "arousal" or "valence".
+        K: Number of channels to select.
+
+    Returns:
+        selected_channel_indices: List of K channel indices (same for all subjects).
+    """
+    print(f"Running global MRMR on {len(all_subjects_preprocessed)} subjects, selecting {K} channels for {classify_type}")
+
+    # Combine all data
+    all_data = []
+    all_labels = []
+
+    for preprocessed in all_subjects_preprocessed:
+        n_windows = preprocessed.shape[0]
+        data_list = [preprocessed[i][0] for i in range(n_windows)]   # (N_CH, N_FREQ)
+        label_list = [preprocessed[i][1] for i in range(n_windows)]  # [valence_bin, arousal_bin]
+
+        data = np.array(data_list)    # (n_windows, N_CH, N_FREQ)
+        labels = np.array(label_list)  # (n_windows, 2)
+
+        # Reshape to (n_windows * N_FREQ, N_CH)
+        n_ch = data.shape[1]
+        x = data.transpose((1, 0, 2)).reshape(n_ch, -1).transpose((1, 0))
+
+        # Labels: repeat for each frequency
+        if classify_type.lower() == "arousal":
+            y = np.repeat(labels[:, 0], N_FREQUENCIES)
+        else:
+            y = np.repeat(labels[:, 1], N_FREQUENCIES)
+
+        all_data.append(x)
+        all_labels.append(y)
+
+    # Stack all
+    all_data = np.vstack(all_data)  # (total_windows, N_CH)
+    all_labels = np.concatenate(all_labels)  # (total_windows,)
+
+    print(f"Combined data shape: {all_data.shape}, labels shape: {all_labels.shape}")
+
+    # Run MRMR once on combined data
+    selected = _mrmr_classif(all_data, all_labels.astype(int), K=K)
     return selected
 
 
