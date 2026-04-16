@@ -415,6 +415,19 @@ def page_train():
                                    format="%.5f")
     batch_sz  = col3.number_input("Batch size", value=256, min_value=32, max_value=1024, step=32)
     dropout   = st.slider("Dropout rate", 0.0, 0.8, 0.5, 0.05)
+    force_gpu = st.checkbox("Bắt buộc dùng GPU (nếu không có thì báo lỗi)", value=False)
+
+    gpu_available = torch.cuda.is_available()
+    if force_gpu and not gpu_available:
+        st.error("GPU không khả dụng trong phiên Streamlit này. Hãy restart app bằng Mainstream/.venv.")
+        return
+
+    device = torch.device("cuda:0" if gpu_available else "cpu")
+    st.info(f"Thiết bị huấn luyện: {device}" + (f" | GPU: {torch.cuda.get_device_name(0)}" if gpu_available else ""))
+    st.caption(
+        f"Runtime PID: {os.getpid()} | torch: {torch.__version__} | "
+        f"cuda_available: {gpu_available} | python: {sys.executable}"
+    )
 
     if st.button("🚀 Bắt đầu Training", type="primary"):
         with st.spinner("Đang chuẩn bị dataset…"):
@@ -435,11 +448,20 @@ def page_train():
         test_ds = TensorDataset(
             torch.tensor(x_test), torch.tensor(y_test_bin, dtype=torch.long)
         )
-        train_loader = DataLoader(train_ds, batch_size=int(batch_sz), shuffle=True)
-        test_loader  = DataLoader(test_ds,  batch_size=int(batch_sz), shuffle=False)
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=int(batch_sz),
+            shuffle=True,
+            pin_memory=gpu_available,
+        )
+        test_loader  = DataLoader(
+            test_ds,
+            batch_size=int(batch_sz),
+            shuffle=False,
+            pin_memory=gpu_available,
+        )
 
         seq_len = x_train.shape[1]
-        device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model   = build_model("mrmr_lstm", seq_len=seq_len, dropout=dropout, input_size=1).to(device)
 
         criterion = nn.CrossEntropyLoss()
@@ -459,7 +481,7 @@ def page_train():
             model.train()
             tr_loss, tr_correct, tr_total = 0.0, 0, 0
             for xb, yb in train_loader:
-                xb, yb = xb.to(device), yb.to(device)
+                xb, yb = xb.to(device, non_blocking=gpu_available), yb.to(device, non_blocking=gpu_available)
                 optimizer.zero_grad()
                 logits = model(xb)
                 loss   = criterion(logits, yb)
@@ -475,7 +497,7 @@ def page_train():
             va_loss, va_correct, va_total = 0.0, 0, 0
             with torch.no_grad():
                 for xb, yb in test_loader:
-                    xb, yb = xb.to(device), yb.to(device)
+                    xb, yb = xb.to(device, non_blocking=gpu_available), yb.to(device, non_blocking=gpu_available)
                     logits  = model(xb)
                     loss    = criterion(logits, yb)
                     va_loss    += loss.item() * len(yb)
@@ -572,10 +594,11 @@ def page_predict():
 
     model = None
     classify_type = st.session_state.classify_type
+    predict_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     if model_source == "Mô hình vừa train":
         if st.session_state.trained_model is not None:
-            model = st.session_state.trained_model
+            model = st.session_state.trained_model.to(predict_device)
             st.success(f"✅ Đang dùng mô hình đã train ({classify_type})")
         else:
             st.warning("Chưa có mô hình – hãy train trước.")
@@ -585,7 +608,7 @@ def page_predict():
         if ckpt_file:
             try:
                 checkpoint = torch.load(io.BytesIO(ckpt_file.read()), map_location="cpu")
-                model = build_model("mrmr_lstm", input_size=1)
+                model = build_model("mrmr_lstm", input_size=1).to(predict_device)
                 model.load_state_dict(checkpoint["model"])
                 model.eval()
                 st.success("✅ Checkpoint `.pth` loaded.")
@@ -797,7 +820,7 @@ def _run_prediction(model, x: np.ndarray, classify_type: str, true_labels=None):
     model.eval()
     x_tensor = torch.from_numpy(x.astype(np.float32))
     device = next(model.parameters()).device if any(p.requires_grad for p in model.parameters()) else torch.device("cpu")
-    x_tensor = x_tensor.to(device)
+    x_tensor = x_tensor.to(device, non_blocking=(device.type == "cuda"))
     with torch.no_grad():
         logits = model(x_tensor)
         probs = torch.softmax(logits, dim=1).cpu().numpy()
@@ -839,7 +862,7 @@ def _predict_model(model, x: np.ndarray):
     model.eval()
     x_tensor = torch.from_numpy(x.astype(np.float32))
     device = next(model.parameters()).device if any(p.requires_grad for p in model.parameters()) else torch.device("cpu")
-    x_tensor = x_tensor.to(device)
+    x_tensor = x_tensor.to(device, non_blocking=(device.type == "cuda"))
     
     with torch.no_grad():
         logits = model(x_tensor)
