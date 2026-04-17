@@ -22,6 +22,10 @@ import pickle
 import sys
 import tempfile
 import time
+import copy
+
+# Reduce CUDA allocator fragmentation if GPU is used.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import matplotlib
 matplotlib.use("Agg")
@@ -64,6 +68,7 @@ st.set_page_config(
 )
 
 BATCH_SIZE = 256
+INFER_BATCH_SIZE = 256
 LR = 1e-3
 DEAP_ELECTRODES = [
     "Fp1", "AF3", "F3", "F7", "FC5", "FC1", "C3", "T7",
@@ -85,6 +90,8 @@ def _init_state():
         "train_history":         None,
         "trained_model":         None,
         "trained_seq_len":       None,
+        "trained_scaler":        None,
+        "trained_channels":      None,
         "classify_type":         "arousal",
         
         # --- THÊM 4 DÒNG NÀY VÀO ---
@@ -435,10 +442,16 @@ def page_train():
                 st.session_state.subjects_preprocessed,
                 st.session_state.selected_channels,
             )
-            x_train, y_train_bin, x_test, y_test_bin = prepare_for_lstm(
+            x_train, y_train_bin, x_test, y_test_bin, scaler_state = prepare_for_lstm(
                 x_train_raw, x_test_raw, y_train_raw, y_test_raw,
                 classify_type=classify_type,
+                return_scaler=True,
             )
+
+        selected_channels = st.session_state.selected_channels[0] if st.session_state.selected_channels else []
+        expected_channels = len(selected_channels) if selected_channels else None
+        x_train = _reshape_flat_features_for_model(x_train.reshape(x_train.shape[0], -1), n_channels=expected_channels)
+        x_test = _reshape_flat_features_for_model(x_test.reshape(x_test.shape[0], -1), n_channels=expected_channels)
 
         st.write(f"Train: `{x_train.shape}` | Test: `{x_test.shape}`")
 
@@ -462,7 +475,8 @@ def page_train():
         )
 
         seq_len = x_train.shape[1]
-        model   = build_model("mrmr_lstm", seq_len=seq_len, dropout=dropout, input_size=1).to(device)
+        input_size = x_train.shape[2]
+        model = build_model("mrmr_lstm", seq_len=seq_len, dropout=dropout, input_size=input_size).to(device)
 
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=float(lr))
@@ -470,6 +484,7 @@ def page_train():
 
         history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
         best_val_acc = 0.0
+        best_state_dict = None
 
         # Progress UI
         epoch_bar   = st.progress(0)
@@ -523,14 +538,22 @@ def page_train():
 
             if va_acc_ep > best_val_acc:
                 best_val_acc = va_acc_ep
-                st.session_state.trained_model   = model
-                st.session_state.trained_seq_len = seq_len
+                # Keep an immutable copy of best weights; using the final epoch
+                # model can be significantly worse than best validation checkpoint.
+                best_state_dict = copy.deepcopy(model.state_dict())
+
+        if best_state_dict is not None:
+            model.load_state_dict(best_state_dict)
 
         st.session_state.train_history = history
         st.session_state.x_train = x_train
         st.session_state.y_train = y_train_bin
         st.session_state.x_test  = x_test
         st.session_state.y_test  = y_test_bin
+        st.session_state.trained_model = model
+        st.session_state.trained_seq_len = seq_len
+        st.session_state.trained_scaler = scaler_state
+        st.session_state.trained_channels = st.session_state.selected_channels[0] if st.session_state.selected_channels else None
 
         st.success(f"✅ Hoàn thành! Best val accuracy: **{best_val_acc:.4f}**")
 
@@ -564,8 +587,11 @@ def page_train():
             torch.save({
                 "model":    st.session_state.trained_model.state_dict(),
                 "seq_len":  st.session_state.trained_seq_len,
+                "input_size": st.session_state.trained_model.lstm.input_size,
                 "target":   st.session_state.classify_type,
                 "history":  st.session_state.train_history,
+                "scaler":   st.session_state.trained_scaler,
+                "channels": st.session_state.trained_channels,
             }, buf)
             buf.seek(0)
             st.download_button(
@@ -593,12 +619,16 @@ def page_predict():
     )
 
     model = None
+    model_scaler = None
+    model_channels = None
     classify_type = st.session_state.classify_type
     predict_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     if model_source == "Mô hình vừa train":
         if st.session_state.trained_model is not None:
             model = st.session_state.trained_model.to(predict_device)
+            model_scaler = st.session_state.trained_scaler
+            model_channels = st.session_state.trained_channels
             st.success(f"✅ Đang dùng mô hình đã train ({classify_type})")
         else:
             st.warning("Chưa có mô hình – hãy train trước.")
@@ -608,13 +638,21 @@ def page_predict():
         if ckpt_file:
             try:
                 checkpoint = torch.load(io.BytesIO(ckpt_file.read()), map_location="cpu")
-                model = build_model("mrmr_lstm", input_size=1).to(predict_device)
+                ckpt_input_size = int(checkpoint.get("input_size", 1))
+                ckpt_seq_len = checkpoint.get("seq_len")
+                model = build_model("mrmr_lstm", seq_len=ckpt_seq_len, input_size=ckpt_input_size).to(predict_device)
                 model.load_state_dict(checkpoint["model"])
                 model.eval()
+                model_scaler = checkpoint.get("scaler")
+                model_channels = checkpoint.get("channels")
                 st.success("✅ Checkpoint `.pth` loaded.")
                 classify_type = checkpoint.get("target", classify_type)
                 if "target" in checkpoint:
                     st.info(f"Model target loaded: {classify_type}")
+                if model_channels is not None:
+                    st.info(f"Model channels loaded: {len(model_channels)} kênh")
+                if model_scaler is not None:
+                    st.info("Model scaler loaded từ checkpoint.")
             except Exception as exc:
                 st.error(f"Không thể load checkpoint: {exc}")
 
@@ -651,6 +689,9 @@ def page_predict():
             if st.button("🚀 Bắt đầu dự đoán .npy", type="primary"):
                 with st.spinner("Đang dự đoán..."):
                     features = np.load(io.BytesIO(npy_file.read()))
+                    if model_scaler is not None:
+                        features = _apply_saved_scaler(features, model_scaler)
+                    features = _to_model_input_layout(features, model, model_channels)
                     probs, preds = _predict_model(model, features)
                     # Lưu vào session_state
                     st.session_state.pred_npy_results = {
@@ -684,7 +725,12 @@ def page_predict():
         dat_file = st.file_uploader("Upload file .dat", type=["dat"], key="upload_dat")
         if dat_file and model is not None:
             # Xác định channels để sử dụng
-            if selected_channels_from_file:
+            if model_channels is not None:
+                selected = model_channels
+                st.info(f"📌 Dùng {len(selected)} kênh từ model/checkpoint để khớp train.")
+                if selected_channels_from_file:
+                    st.warning("Đang bỏ qua file kênh upload để tránh lệch với model đã train.")
+            elif selected_channels_from_file:
                 selected = selected_channels_from_file
                 st.info(f"📌 Sử dụng {len(selected)} kênh từ file upload")
             elif st.session_state.selected_channels:
@@ -705,9 +751,13 @@ def page_predict():
                     
                     from sklearn.preprocessing import normalize as _normalize, StandardScaler as _SS
                     all_x_norm = _normalize(all_x).astype(np.float32)
-                    scaler = _SS()
-                    all_x_scaled = scaler.fit_transform(all_x_norm).astype(np.float32)
-                    x_norm = all_x_scaled.reshape(all_x_scaled.shape[0], all_x_scaled.shape[1], 1)
+                    if model_scaler is not None:
+                        all_x_scaled = _apply_saved_scaler(all_x_norm, model_scaler, already_l2_normalized=True)
+                    else:
+                        st.warning("Không tìm thấy scaler từ model. Đang fit scaler mới trên dữ liệu predict (có thể làm giảm accuracy).")
+                        scaler = _SS()
+                        all_x_scaled = scaler.fit_transform(all_x_norm).astype(np.float32)
+                    x_norm = _to_model_input_layout(all_x_scaled, model, selected)
                     col = 0 if classify_type.lower() == "arousal" else 1
                     y_bin = all_y[:, col]
 
@@ -813,19 +863,7 @@ def page_predict():
                     st.warning("Không có window nào cho trial đã chọn.")
 def _run_prediction(model, x: np.ndarray, classify_type: str, true_labels=None):
     """Helper: run model on x and display results."""
-    # Ensure correct shape for models expecting (n, seq, 1)
-    if x.ndim == 2:
-        x = x[:, :, np.newaxis]
-
-    model.eval()
-    x_tensor = torch.from_numpy(x.astype(np.float32))
-    device = next(model.parameters()).device if any(p.requires_grad for p in model.parameters()) else torch.device("cpu")
-    x_tensor = x_tensor.to(device, non_blocking=(device.type == "cuda"))
-    with torch.no_grad():
-        logits = model(x_tensor)
-        probs = torch.softmax(logits, dim=1).cpu().numpy()
-
-    preds = probs.argmax(axis=1)
+    probs, preds = _predict_model(model, x)
 
     labels_map = {0: "Low", 1: "High"}
     st.markdown("---")
@@ -854,22 +892,192 @@ def _run_prediction(model, x: np.ndarray, classify_type: str, true_labels=None):
     st.dataframe(df_pred.head(50), use_container_width=True, hide_index=True)
 
 
-def _predict_model(model, x: np.ndarray):
-    """Run model inference and return probabilities and class predictions."""
+def _model_device(model: torch.nn.Module) -> torch.device:
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
+def _predict_in_batches(model, x: np.ndarray, batch_size: int = INFER_BATCH_SIZE, use_amp: bool = True):
+    """Memory-safe inference with dynamic batch shrink on CUDA OOM."""
     if x.ndim == 2:
         x = x[:, :, np.newaxis]
 
+    x = x.astype(np.float32, copy=False)
     model.eval()
-    x_tensor = torch.from_numpy(x.astype(np.float32))
-    device = next(model.parameters()).device if any(p.requires_grad for p in model.parameters()) else torch.device("cpu")
-    x_tensor = x_tensor.to(device, non_blocking=(device.type == "cuda"))
-    
-    with torch.no_grad():
-        logits = model(x_tensor)
-        probs = torch.softmax(logits, dim=1).cpu().numpy()
+    device = _model_device(model)
+    n_samples = x.shape[0]
+
+    if n_samples == 0:
+        return np.empty((0, 2), dtype=np.float32), np.empty((0,), dtype=np.int64)
+
+    probs = np.empty((n_samples, 2), dtype=np.float32)
+    current_batch = max(1, min(int(batch_size), n_samples))
+    start = 0
+
+    while start < n_samples:
+        end = min(start + current_batch, n_samples)
+        try:
+            x_batch = torch.from_numpy(x[start:end]).to(
+                device,
+                non_blocking=(device.type == "cuda"),
+            )
+
+            with torch.inference_mode():
+                if use_amp and device.type == "cuda":
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        logits = model(x_batch)
+                else:
+                    logits = model(x_batch)
+
+                batch_probs = torch.softmax(logits, dim=1).float().cpu().numpy()
+
+            probs[start:end] = batch_probs
+            start = end
+        except torch.cuda.OutOfMemoryError:
+            if device.type != "cuda" or current_batch == 1:
+                raise
+
+            # Retry with smaller batch size if current batch still exceeds available VRAM.
+            torch.cuda.empty_cache()
+            current_batch = max(1, current_batch // 2)
 
     preds = probs.argmax(axis=1)
     return probs, preds
+
+
+def _predict_model(model, x: np.ndarray):
+    """Run model inference and return probabilities and class predictions."""
+    device = _model_device(model)
+
+    try:
+        return _predict_in_batches(model, x, batch_size=INFER_BATCH_SIZE, use_amp=True)
+    except torch.cuda.OutOfMemoryError:
+        if device.type != "cuda":
+            raise
+
+        # Fallback to CPU when dynamic batch shrink on GPU is still insufficient.
+        st.warning("GPU không đủ bộ nhớ khi dự đoán. Đang chuyển sang CPU để hoàn tất dự đoán.")
+        model.to(torch.device("cpu"))
+        torch.cuda.empty_cache()
+        return _predict_in_batches(model, x, batch_size=max(32, INFER_BATCH_SIZE // 2), use_amp=False)
+
+
+def _reshape_flat_features_for_model(x_2d: np.ndarray, n_channels: int | None = None) -> np.ndarray:
+    """Convert flattened MRMR features (K*5) to LSTM input layout (n, 5, K)."""
+    if x_2d.ndim != 2:
+        raise ValueError("Input phải là mảng 2D có shape (n_samples, n_features).")
+
+    n_samples, n_features = x_2d.shape
+    if n_features % N_FREQUENCIES != 0:
+        raise ValueError(
+            f"Feature dim={n_features} không chia hết cho số dải tần {N_FREQUENCIES}."
+        )
+
+    inferred_channels = n_features // N_FREQUENCIES
+    channels = inferred_channels if n_channels is None else int(n_channels)
+    if channels != inferred_channels:
+        raise ValueError(
+            f"Mismatch số kênh: dữ liệu có {inferred_channels} kênh, nhưng kỳ vọng {channels}."
+        )
+
+    x_cf = x_2d.reshape(n_samples, channels, N_FREQUENCIES)
+    return x_cf.transpose(0, 2, 1).astype(np.float32)
+
+
+def _flatten_model_features(x_3d: np.ndarray) -> np.ndarray:
+    """Flatten model layout (n, 5, K) back to (n, K*5) for scaler usage."""
+    if x_3d.ndim != 3:
+        raise ValueError("Input phải là mảng 3D.")
+
+    if x_3d.shape[1] == N_FREQUENCIES:
+        x_cf = x_3d.transpose(0, 2, 1)
+    elif x_3d.shape[2] == N_FREQUENCIES:
+        x_cf = x_3d
+    else:
+        raise ValueError(
+            f"Không suy ra được layout từ shape={x_3d.shape}. Cần có một trục bằng {N_FREQUENCIES}."
+        )
+
+    return x_cf.reshape(x_cf.shape[0], -1).astype(np.float32)
+
+
+def _to_model_input_layout(
+    features: np.ndarray,
+    model: torch.nn.Module,
+    selected_channels: list | None = None,
+) -> np.ndarray:
+    """Coerce 2D/3D feature arrays to model input layout (n, seq_len, input_size)."""
+    expected_input_size = getattr(getattr(model, "lstm", None), "input_size", None)
+
+    if features.ndim == 2:
+        return _reshape_flat_features_for_model(features, n_channels=expected_input_size)
+
+    if features.ndim != 3:
+        raise ValueError("Input features phải có shape 2D hoặc 3D.")
+
+    # Already in new layout (n, 5, K)
+    if features.shape[1] == N_FREQUENCIES:
+        if expected_input_size is not None and features.shape[2] != expected_input_size:
+            raise ValueError(
+                f"Model yêu cầu input_size={expected_input_size} nhưng dữ liệu có {features.shape[2]} kênh."
+            )
+        return features.astype(np.float32)
+
+    # Legacy layout (n, K*5, 1)
+    if features.shape[-1] == 1:
+        flat = features.reshape(features.shape[0], features.shape[1]).astype(np.float32)
+        return _reshape_flat_features_for_model(flat, n_channels=expected_input_size)
+
+    # Layout (n, K, 5)
+    if features.shape[2] == N_FREQUENCIES:
+        flat = _flatten_model_features(features)
+        return _reshape_flat_features_for_model(flat, n_channels=expected_input_size)
+
+    channel_hint = len(selected_channels) if selected_channels else expected_input_size
+    flat = _flatten_model_features(features)
+    return _reshape_flat_features_for_model(flat, n_channels=channel_hint)
+
+
+def _apply_saved_scaler(x: np.ndarray, scaler_state: dict, already_l2_normalized: bool = False) -> np.ndarray:
+    """Apply the same normalization used during training.
+
+    Expects scaler_state with keys ``mean`` and ``scale`` from prepare_for_lstm.
+    """
+    from sklearn.preprocessing import normalize as _normalize
+
+    if x.ndim == 3:
+        if x.shape[-1] == 1:
+            x_2d = x.reshape(x.shape[0], x.shape[1]).astype(np.float32)
+            original_layout = "legacy"
+            legacy_seq_len = x.shape[1]
+        else:
+            x_2d = _flatten_model_features(x)
+            original_layout = "channel_frequency"
+            original_channels = x.shape[2] if x.shape[1] == N_FREQUENCIES else x.shape[1]
+    elif x.ndim == 2:
+        x_2d = x.astype(np.float32)
+        original_layout = "flat"
+    else:
+        raise ValueError("Input features phải có shape 2D hoặc 3D.")
+
+    x_norm = x_2d if already_l2_normalized else _normalize(x_2d).astype(np.float32)
+    mean = np.asarray(scaler_state["mean"], dtype=np.float32)
+    scale = np.asarray(scaler_state["scale"], dtype=np.float32)
+
+    if x_norm.shape[1] != mean.shape[0]:
+        raise ValueError(
+            f"Feature dim mismatch: input={x_norm.shape[1]}, model expects={mean.shape[0]}. "
+            "Hãy kiểm tra lại channels và kiểu dữ liệu đầu vào."
+        )
+
+    x_scaled = (x_norm - mean) / (scale + 1e-8)
+    if original_layout == "legacy":
+        return x_scaled.reshape(x_scaled.shape[0], legacy_seq_len, 1).astype(np.float32)
+    if original_layout == "channel_frequency":
+        return _reshape_flat_features_for_model(x_scaled, n_channels=original_channels)
+    return x_scaled.astype(np.float32)
 
 def _build_window_metadata(subject):
     """Build trial and window metadata for DEAP .dat data."""
