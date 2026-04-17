@@ -5,7 +5,7 @@ import os
 import pickle
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Callable
 
 import matplotlib
 matplotlib.use("Agg")
@@ -16,6 +16,7 @@ import streamlit as st
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
+from sklearn.preprocessing import normalize as _normalize, StandardScaler
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -235,7 +236,13 @@ def _load_model_from_checkpoint(checkpoint: Any) -> nn.Module:
         checkpoint.eval()
         return checkpoint
 
-    model = build_model("mrmr_lstm", input_size=1)
+    input_size = 1
+    seq_len = None
+    if isinstance(checkpoint, dict):
+        input_size = int(checkpoint.get("input_size", 1))
+        seq_len = checkpoint.get("seq_len")
+
+    model = build_model("mrmr_lstm", seq_len=seq_len, input_size=input_size)
     state_dict = None
     if isinstance(checkpoint, dict):
         for key in ("model_state_dict", "state_dict", "model"):
@@ -271,7 +278,16 @@ def _upload_model_file(target: str, uploaded_file: Any) -> None:
         raise ValueError("Chưa chọn file model để upload")
     checkpoint = torch.load(io.BytesIO(uploaded_file.getvalue()), map_location="cpu")
     model = _load_model_from_checkpoint(checkpoint)
-    _store_model_result(target, model, checkpoint if isinstance(checkpoint, dict) else {"model": model.state_dict()}, "upload", uploaded_file.name)
+    resolved_target = target
+    if isinstance(checkpoint, dict) and checkpoint.get("target") in TARGETS:
+        resolved_target = str(checkpoint.get("target"))
+    _store_model_result(
+        resolved_target,
+        model,
+        checkpoint if isinstance(checkpoint, dict) else {"model": model.state_dict()},
+        "upload",
+        uploaded_file.name,
+    )
 
 
 def _load_selected_channels(target: str) -> list[int]:
@@ -289,7 +305,25 @@ def _prepare_training_arrays(processed_records: list[dict[str, Any]], channels: 
     processed_arrays = _build_processed_arrays(processed_records)
     selected_per_subject = [channels] * len(processed_arrays)
     x_train_raw, y_train_raw, x_test_raw, y_test_raw = build_mrmr_dataset(processed_arrays, selected_per_subject)
-    return prepare_for_lstm(x_train_raw, x_test_raw, y_train_raw, y_test_raw, classify_type=target)
+    x_train_norm = _normalize(x_train_raw).astype(np.float32)
+    scaler = StandardScaler()
+    scaler.fit(x_train_norm)
+    scaler_state = {
+        "mean": scaler.mean_.astype(np.float32),
+        "scale": scaler.scale_.astype(np.float32),
+    }
+
+    x_train, y_train, x_test, y_test = prepare_for_lstm(
+        x_train_raw,
+        x_test_raw,
+        y_train_raw,
+        y_test_raw,
+        classify_type=target,
+    )
+
+    x_train = _reshape_flat_features_for_model(x_train.reshape(x_train.shape[0], -1), n_channels=len(channels))
+    x_test = _reshape_flat_features_for_model(x_test.reshape(x_test.shape[0], -1), n_channels=len(channels))
+    return x_train, y_train, x_test, y_test, scaler_state
 
 
 def _predict_windows(model: nn.Module, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -311,25 +345,107 @@ def _predict_windows(model: nn.Module, x: np.ndarray) -> tuple[np.ndarray, np.nd
 
 def _prepare_prediction_inputs(processed_record: dict[str, Any], channels: list[int], target: str) -> tuple[np.ndarray, np.ndarray]:
     data = processed_record["data"]
-    n_windows = data.shape[0]
-    data_list = [data[i][0] for i in range(n_windows)]
-    label_list = [data[i][1] for i in range(n_windows)]
+    x_r, y_r, x_t, y_t = build_mrmr_dataset([data], [channels])
+    x_all = np.concatenate([x_r, x_t], axis=0)
+    y_all = np.concatenate([y_r, y_t], axis=0)
+    y_bin = y_all[:, 0] if target == "arousal" else y_all[:, 1]
+    return x_all.astype(np.float32), y_bin.astype(np.int64)
 
-    window_data = np.array(data_list)
-    window_labels = np.array(label_list)
-    n_ch = window_data.shape[1]
-    x_all = window_data.transpose((1, 0, 2)).reshape(n_ch, -1).transpose((1, 0))
-    x_df = pd.DataFrame(x_all)
-    filtered = x_df[channels].to_numpy()
 
-    reshaped = []
-    for ch_data in filtered.T:
-        reshaped.append(ch_data.reshape(-1, N_FREQUENCIES))
-    x_flat = np.array(reshaped).transpose((1, 0, 2)).reshape(-1, len(channels) * N_FREQUENCIES)
+def _reshape_flat_features_for_model(x_2d: np.ndarray, n_channels: int | None = None) -> np.ndarray:
+    if x_2d.ndim != 2:
+        raise ValueError("Input phải là mảng 2D có shape (n_samples, n_features).")
 
-    y_bin = window_labels[:, 0] if target == "arousal" else window_labels[:, 1]
-    x_train, y_train, _, _ = prepare_for_lstm(x_flat, x_flat, np.column_stack([y_bin, y_bin]), np.column_stack([y_bin, y_bin]), classify_type=target)
-    return x_train, y_train
+    n_samples, n_features = x_2d.shape
+    if n_features % N_FREQUENCIES != 0:
+        raise ValueError(f"Feature dim={n_features} không chia hết cho số dải tần {N_FREQUENCIES}.")
+
+    inferred_channels = n_features // N_FREQUENCIES
+    channels = inferred_channels if n_channels is None else int(n_channels)
+    if channels != inferred_channels:
+        raise ValueError(
+            f"Mismatch số kênh: dữ liệu có {inferred_channels} kênh, nhưng kỳ vọng {channels}."
+        )
+
+    x_cf = x_2d.reshape(n_samples, channels, N_FREQUENCIES)
+    return x_cf.transpose(0, 2, 1).astype(np.float32)
+
+
+def _flatten_model_features(x_3d: np.ndarray) -> np.ndarray:
+    if x_3d.ndim != 3:
+        raise ValueError("Input phải là mảng 3D.")
+
+    if x_3d.shape[1] == N_FREQUENCIES:
+        x_cf = x_3d.transpose(0, 2, 1)
+    elif x_3d.shape[2] == N_FREQUENCIES:
+        x_cf = x_3d
+    else:
+        raise ValueError(
+            f"Không suy ra được layout từ shape={x_3d.shape}. Cần có một trục bằng {N_FREQUENCIES}."
+        )
+    return x_cf.reshape(x_cf.shape[0], -1).astype(np.float32)
+
+
+def _apply_saved_scaler(x: np.ndarray, scaler_state: dict, already_l2_normalized: bool = False) -> np.ndarray:
+    if x.ndim == 3:
+        if x.shape[-1] == 1:
+            x_2d = x.reshape(x.shape[0], x.shape[1]).astype(np.float32)
+            original_layout = "legacy"
+            legacy_seq_len = x.shape[1]
+        else:
+            x_2d = _flatten_model_features(x)
+            original_layout = "channel_frequency"
+            original_channels = x.shape[2] if x.shape[1] == N_FREQUENCIES else x.shape[1]
+    elif x.ndim == 2:
+        x_2d = x.astype(np.float32)
+        original_layout = "flat"
+    else:
+        raise ValueError("Input features phải có shape 2D hoặc 3D.")
+
+    x_norm = x_2d if already_l2_normalized else _normalize(x_2d).astype(np.float32)
+    mean = np.asarray(scaler_state["mean"], dtype=np.float32)
+    scale = np.asarray(scaler_state["scale"], dtype=np.float32)
+
+    if x_norm.shape[1] != mean.shape[0]:
+        raise ValueError(
+            f"Feature dim mismatch: input={x_norm.shape[1]}, model expects={mean.shape[0]}."
+        )
+
+    x_scaled = (x_norm - mean) / (scale + 1e-8)
+    if original_layout == "legacy":
+        return x_scaled.reshape(x_scaled.shape[0], legacy_seq_len, 1).astype(np.float32)
+    if original_layout == "channel_frequency":
+        return _reshape_flat_features_for_model(x_scaled, n_channels=original_channels)
+    return x_scaled.astype(np.float32)
+
+
+def _to_model_input_layout(features: np.ndarray, model: torch.nn.Module, selected_channels: list[int] | None = None) -> np.ndarray:
+    expected_input_size = getattr(getattr(model, "lstm", None), "input_size", None)
+
+    if features.ndim == 2:
+        return _reshape_flat_features_for_model(features, n_channels=expected_input_size)
+
+    if features.ndim != 3:
+        raise ValueError("Input features phải có shape 2D hoặc 3D.")
+
+    if features.shape[1] == N_FREQUENCIES:
+        if expected_input_size is not None and features.shape[2] != expected_input_size:
+            raise ValueError(
+                f"Model yêu cầu input_size={expected_input_size} nhưng dữ liệu có {features.shape[2]} kênh."
+            )
+        return features.astype(np.float32)
+
+    if features.shape[-1] == 1:
+        flat = features.reshape(features.shape[0], features.shape[1]).astype(np.float32)
+        return _reshape_flat_features_for_model(flat, n_channels=expected_input_size)
+
+    if features.shape[2] == N_FREQUENCIES:
+        flat = _flatten_model_features(features)
+        return _reshape_flat_features_for_model(flat, n_channels=expected_input_size)
+
+    channel_hint = len(selected_channels) if selected_channels else expected_input_size
+    flat = _flatten_model_features(features)
+    return _reshape_flat_features_for_model(flat, n_channels=channel_hint)
 
 
 def _channel_dataframe(channels: list[int]) -> pd.DataFrame:
@@ -349,8 +465,17 @@ def _run_mrmr_task(target: str, processed_records: list[dict[str, Any]], k: int)
     }
 
 
-def _fit_model_for_target(target: str, processed_records: list[dict[str, Any]], channels: list[int], epochs: int, lr: float, batch_size: int, dropout: float) -> dict[str, Any]:
-    x_train, y_train, x_test, y_test = _prepare_training_arrays(processed_records, channels, target)
+def _fit_model_for_target(
+    target: str,
+    processed_records: list[dict[str, Any]],
+    channels: list[int],
+    epochs: int,
+    lr: float,
+    batch_size: int,
+    dropout: float,
+    progress_callback: Callable[[int, int, float, float, float, float], None] | None = None,
+) -> dict[str, Any]:
+    x_train, y_train, x_test, y_test, scaler_state = _prepare_training_arrays(processed_records, channels, target)
 
     train_ds = TensorDataset(torch.tensor(x_train), torch.tensor(y_train, dtype=torch.long))
     test_ds = TensorDataset(torch.tensor(x_test), torch.tensor(y_test, dtype=torch.long))
@@ -358,7 +483,7 @@ def _fit_model_for_target(target: str, processed_records: list[dict[str, Any]], 
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_model("mrmr_lstm", input_size=1, dropout=dropout).to(device)
+    model = build_model("mrmr_lstm", seq_len=x_train.shape[1], input_size=x_train.shape[2], dropout=dropout).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
@@ -410,6 +535,9 @@ def _fit_model_for_target(target: str, processed_records: list[dict[str, Any]], 
         history["train_acc"].append(tr_acc_ep)
         history["val_acc"].append(va_acc_ep)
 
+        if progress_callback is not None:
+            progress_callback(epoch + 1, int(epochs), tr_loss_ep, tr_acc_ep, va_loss_ep, va_acc_ep)
+
         if va_acc_ep >= best_val_acc:
             best_val_acc = va_acc_ep
             best_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
@@ -419,11 +547,15 @@ def _fit_model_for_target(target: str, processed_records: list[dict[str, Any]], 
     model.eval()
 
     checkpoint = {
+        "model": model.state_dict(),
         "model_state_dict": model.state_dict(),
+        "seq_len": x_train.shape[1],
+        "input_size": model.lstm.input_size,
         "target": target,
         "history": history,
+        "scaler": scaler_state,
+        "channels": channels,
         "selected_channels": channels,
-        "input_size": 1,
     }
     return {
         "target": target,
@@ -436,16 +568,27 @@ def _fit_model_for_target(target: str, processed_records: list[dict[str, Any]], 
 
 
 def _predict_target(target: str, processed_record: dict[str, Any], file_manager: dict[str, Any]) -> dict[str, Any]:
-    mrmr_entry = _resolve_mrmr_entry(target, file_manager)
     model_entry = _resolve_model_entry(target, file_manager)
-    if mrmr_entry is None:
-        raise ValueError(f"Thiếu file MRMR cho {_target_label(target)}")
     if model_entry is None or model_entry.get("model") is None:
         raise ValueError(f"Thiếu model cho {_target_label(target)}")
 
-    channels = _extract_channels(mrmr_entry)
+    checkpoint = model_entry.get("checkpoint", {}) if isinstance(model_entry, dict) else {}
+    channels = checkpoint.get("channels") or checkpoint.get("selected_channels")
+    if channels is None:
+        raise ValueError(f"Model cho {_target_label(target)} không có thông tin channels MRMR.")
+    channels = [int(value) for value in channels]
+    scaler_state = checkpoint.get("scaler")
+
     model = model_entry["model"]
-    x_input, y_input = _prepare_prediction_inputs(processed_record, channels, target)
+    x_flat, y_input = _prepare_prediction_inputs(processed_record, channels, target)
+    x_norm = _normalize(x_flat).astype(np.float32)
+    if scaler_state is not None:
+        x_scaled = _apply_saved_scaler(x_norm, scaler_state, already_l2_normalized=True)
+    else:
+        scaler = StandardScaler()
+        x_scaled = scaler.fit_transform(x_norm).astype(np.float32)
+    x_input = _to_model_input_layout(x_scaled, model, channels)
+
     probs, preds = _predict_windows(model, x_input)
     accuracy = float((preds == y_input).mean()) if len(y_input) else 0.0
 
@@ -525,13 +668,7 @@ def _render_manager_panel() -> None:
             st.caption("Chưa có dữ liệu FFT.")
 
     with st.expander("🔬 MRMR Selection", expanded=True):
-        for target in TARGETS:
-            _auto_upload_row(
-                target=target,
-                entry=fm["mrmr_selection"].get(target),
-                upload_type="mrmr",
-                file_types=["xlsx", "xls", "csv"],
-            )
+        st.caption("MRMR được tự chạy trong Train Model và lưu cùng checkpoint.")
 
     with st.expander("🎓 Model", expanded=True):
         for target in TARGETS:
@@ -570,10 +707,10 @@ def page_home() -> None:
     col1, col2, col3 = st.columns(3)
     with col1:
         st.info("1. Load Data\nUpload file .dat từ DEAP dataset")
-        st.info("4. MRMR Selection\nChọn kênh cho Arousal và Valence")
+        st.info("4. Train Model\nTự chạy MRMR global và train theo nhãn")
     with col2:
         st.success("2. Preprocess\nTrích xuất FFT 5 dải tần")
-        st.success("5. Train Model\nHuấn luyện BiLSTM theo từng nhãn")
+        st.success("5. Download Model\nLưu checkpoint kèm channels + scaler")
     with col3:
         st.warning("3. Explore\nXem trước tín hiệu EEG")
         st.warning("6. Predict\nChạy suy luận song song")
@@ -670,11 +807,14 @@ def page_preprocess() -> None:
         if st.button("🚀 Bắt đầu Preprocess", type="primary"):
             processed = []
             progress = st.progress(0)
+            status_text = st.empty()
             for index, record in enumerate(raw_records):
+                status_text.info(f"Đang xử lý {record['name']} ({index + 1}/{len(raw_records)})")
                 preprocessed = preprocess_subject_fft(record["subject"], window_size=int(window_size), step_size=int(step_size))
                 processed.append(_normalize_processed_record(record["name"], preprocessed, {"window_size": int(window_size), "step_size": int(step_size)}))
                 progress.progress((index + 1) / len(raw_records))
             _file_manager()["processed_data"] = processed
+            status_text.success("Preprocess hoàn tất.")
             st.success(f"Đã xử lý {len(processed)} subject(s).")
 
         processed_records = _get_processed_records()
@@ -694,62 +834,6 @@ def page_preprocess() -> None:
             plt.colorbar(im, ax=ax, label="Power")
             st.pyplot(fig)
             plt.close(fig)
-
-        st.button("Tiếp tục → MRMR", on_click=goto, args=("MRMR Selection",))
-
-    _layout_with_manager(render_main)
-
-
-def page_mrmr() -> None:
-    def render_main() -> None:
-        st.title("🔬 MRMR Channel Selection")
-        processed_records = _get_processed_records()
-        if not processed_records:
-            st.warning("Chưa có dữ liệu FFT. Hãy preprocess trước.")
-            st.button("← Preprocess", on_click=goto, args=("Preprocess",))
-            return
-
-        target_choices = {target: st.checkbox(_target_label(target), value=True, key=f"mrmr_choice_{target}") for target in TARGETS}
-        selected_targets = [target for target, enabled in target_choices.items() if enabled]
-        if not selected_targets:
-            st.warning("Hãy chọn ít nhất một nhãn để chạy MRMR.")
-            return
-
-        k_value = st.slider("Số kênh MRMR (K)", min_value=5, max_value=32, value=MRMR_COMPONENTS, step=1)
-
-        if st.button("🔬 Chạy MRMR", type="primary"):
-            with st.status("Đang chạy MRMR...", expanded=True) as status:
-                tasks = {}
-                results: dict[str, dict[str, Any]] = {}
-                max_workers = len(selected_targets)
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    for target in selected_targets:
-                        tasks[executor.submit(_run_mrmr_task, target, processed_records, int(k_value))] = target
-                    for future in as_completed(tasks):
-                        target = tasks[future]
-                        result = future.result()
-                        results[target] = result
-                        _store_mrmr_result(target, result["channels"], source="computed", name=result["file_name"])
-                        status.write(f"Hoàn thành {_target_label(target)}")
-                status.update(label="MRMR hoàn tất", state="complete")
-                st.session_state.runtime["mrmr_results"] = results
-
-        runtime_results = st.session_state.runtime.get("mrmr_results", {})
-        if runtime_results:
-            st.markdown("---")
-            for target, result in runtime_results.items():
-                st.subheader(f"{_target_label(target)}")
-                channels = result["channels"]
-                channel_names = ", ".join(_channel_name(channel) for channel in channels)
-                st.write(f"Kênh chọn: {channel_names}")
-                st.dataframe(result["dataframe"], use_container_width=True, hide_index=True)
-                st.download_button(
-                    f"Tải {_target_label(target)} Excel",
-                    data=_selection_to_download_bytes(target),
-                    file_name=result["file_name"],
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download_mrmr_page_{target}",
-                )
 
         st.button("Tiếp tục → Train Model", on_click=goto, args=("Train Model",))
 
@@ -776,40 +860,68 @@ def page_train() -> None:
         lr = float(col_b.number_input("Learning rate", value=LR, min_value=1e-5, max_value=0.1, format="%.5f"))
         batch_size = int(col_c.number_input("Batch size", value=BATCH_SIZE, min_value=32, max_value=1024, step=32))
         dropout = float(st.slider("Dropout", 0.0, 0.8, 0.5, 0.05))
+        k_value = int(st.slider("Số kênh MRMR (K)", min_value=5, max_value=32, value=MRMR_COMPONENTS, step=1))
 
         if st.button("🚀 Bắt đầu Training", type="primary"):
-            missing = []
-            for target in selected_targets:
-                if _resolve_mrmr_entry(target) is None:
-                    missing.append(f"thiếu file MRMR cho {_target_label(target)}")
-            if missing:
-                st.error("; ".join(missing))
-                return
+            results: dict[str, dict[str, Any]] = {}
+            mrmr_results: dict[str, dict[str, Any]] = {}
+            channels_map: dict[str, list[int]] = {}
 
-            with st.status("Đang train song song...", expanded=True) as status:
-                results: dict[str, dict[str, Any]] = {}
-                with ThreadPoolExecutor(max_workers=len(selected_targets)) as executor:
-                    future_map = {
-                        executor.submit(
-                            _fit_model_for_target,
-                            target,
-                            processed_records,
-                            _load_selected_channels(target),
-                            epochs,
-                            lr,
-                            batch_size,
-                            dropout,
-                        ): target
-                        for target in selected_targets
-                    }
-                    for future in as_completed(future_map):
-                        target = future_map[future]
-                        result = future.result()
-                        results[target] = result
-                        _store_model_result(target, result["model"], result["checkpoint"], source="trained")
-                        status.write(f"Hoàn thành {_target_label(target)}")
-                status.update(label="Training hoàn tất", state="complete")
-                st.session_state.runtime["training_results"] = results
+            stage_text = st.empty()
+            overall_bar = st.progress(0)
+            mrmr_bar = st.progress(0)
+
+            stage_text.info("Đang chạy MRMR global...")
+            for idx, target in enumerate(selected_targets):
+                mrmr_result = _run_mrmr_task(target, processed_records, k_value)
+                channels_map[target] = mrmr_result["channels"]
+                mrmr_results[target] = mrmr_result
+                _store_mrmr_result(target, mrmr_result["channels"], source="computed", name=mrmr_result["file_name"])
+                mrmr_bar.progress((idx + 1) / max(len(selected_targets), 1))
+
+            st.session_state.runtime["mrmr_results"] = mrmr_results
+            stage_text.success("MRMR hoàn tất. Danh sách kênh đã được lưu vào model/checkpoint.")
+
+            for target in selected_targets:
+                channels = channels_map[target]
+                st.markdown(f"**{_target_label(target)} - Kênh MRMR ({len(channels)}):**")
+                st.dataframe(_channel_dataframe(channels), use_container_width=True, hide_index=True)
+
+            epoch_bar = st.progress(0)
+            metric_text = st.empty()
+            total_targets = len(selected_targets)
+
+            for target_idx, target in enumerate(selected_targets):
+                stage_text.info(f"Đang training {_target_label(target)} ({target_idx + 1}/{total_targets})")
+
+                def _on_epoch(epoch: int, total: int, tr_loss: float, tr_acc: float, va_loss: float, va_acc: float) -> None:
+                    per_target = epoch / max(total, 1)
+                    global_progress = (target_idx + per_target) / max(total_targets, 1)
+                    overall_bar.progress(global_progress)
+                    epoch_bar.progress(per_target)
+                    metric_text.markdown(
+                        f"**{_target_label(target)} - Epoch {epoch}/{total}** | "
+                        f"Train Loss: `{tr_loss:.4f}` Acc: `{tr_acc:.3f}` | "
+                        f"Val Loss: `{va_loss:.4f}` Acc: `{va_acc:.3f}`"
+                    )
+
+                result = _fit_model_for_target(
+                    target,
+                    processed_records,
+                    channels_map[target],
+                    epochs,
+                    lr,
+                    batch_size,
+                    dropout,
+                    progress_callback=_on_epoch,
+                )
+                results[target] = result
+                _store_model_result(target, result["model"], result["checkpoint"], source="trained")
+                epoch_bar.progress(1.0)
+
+            stage_text.success("Training hoàn tất")
+            overall_bar.progress(1.0)
+            st.session_state.runtime["training_results"] = results
 
         training_results = st.session_state.runtime.get("training_results", {})
         if training_results:
@@ -863,8 +975,6 @@ def page_predict() -> None:
 
         missing = []
         for target in selected_targets:
-            if _resolve_mrmr_entry(target) is None:
-                missing.append(f"thiếu file MRMR cho {_target_label(target)}")
             if _resolve_model_entry(target) is None:
                 missing.append(f"thiếu model cho {_target_label(target)}")
         if missing:
@@ -893,7 +1003,6 @@ PAGE_FUNCS = {
     "Home": page_home,
     "Load Data": page_load_data,
     "Preprocess": page_preprocess,
-    "MRMR Selection": page_mrmr,
     "Train Model": page_train,
     "Predict": page_predict,
 }
@@ -914,7 +1023,6 @@ def render_app() -> None:
             "Home": "🏠 Home",
             "Load Data": "📤 Load DEAP Data",
             "Preprocess": "⚡ Preprocess (FFT)",
-            "MRMR Selection": "🔬 MRMR Channel Selection",
             "Train Model": "🎓 Train Model",
             "Predict": "🔮 Predict",
         }
