@@ -470,20 +470,52 @@ def _render_manager_panel() -> None:
     fm = _file_manager()
     st.subheader("🗂 Virtual File Manager")
 
+    def _entry_status_line(target: str, entry: dict[str, Any] | None) -> str:
+        file_name = (entry or {}).get("name")
+        return f"{_target_label(target)}: {file_name if file_name else 'Trống'}"
+
+    def _auto_upload_row(
+        target: str,
+        entry: dict[str, Any] | None,
+        upload_type: str,
+        file_types: list[str],
+    ) -> None:
+        left_col, right_col = st.columns([2.6, 1.2], gap="small")
+        with left_col:
+            st.markdown(f"**{_entry_status_line(target, entry)}**")
+        with right_col:
+            upload = st.file_uploader(
+                f"Upload {_target_label(target)}",
+                type=file_types,
+                key=f"manager_{upload_type}_upload_{target}",
+                label_visibility="collapsed",
+            )
+
+        # Auto-upload ngay khi người dùng chọn file, không cần nút Upload riêng.
+        if upload is not None:
+            content = upload.getvalue()
+            marker_key = f"manager_{upload_type}_uploaded_marker_{target}"
+            file_signature = (upload.name, len(content), hash(content))
+            if st.session_state.get(marker_key) != file_signature:
+                try:
+                    if upload_type == "mrmr":
+                        _upload_mrmr_file(target, upload)
+                        st.success(f"Đã cập nhật MRMR cho {_target_label(target)}.")
+                    else:
+                        _upload_model_file(target, upload)
+                        st.success(f"Đã cập nhật model cho {_target_label(target)}.")
+                    st.session_state[marker_key] = file_signature
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Không thể upload file cho {_target_label(target)}: {exc}")
+
     with st.expander("📂 Data", expanded=True):
         if fm["raw_data"]:
             for item in fm["raw_data"]:
                 st.write(f"• {item['name']}")
         else:
             st.caption("Chưa có file .dat nào.")
-        raw_upload = st.file_uploader("Upload .dat", type=["dat"], accept_multiple_files=True, key="manager_raw_upload")
-        if st.button("Upload Data", key="manager_raw_upload_button", use_container_width=True):
-            if not raw_upload:
-                st.warning("Hãy chọn ít nhất một file .dat.")
-            else:
-                _store_raw_data(raw_upload)
-                st.success(f"Đã nạp {len(raw_upload)} file .dat.")
-                st.rerun()
+        st.caption("Upload .dat chỉ thực hiện tại trang Load DEAP Data.")
 
     with st.expander("⚡ Processed Data", expanded=True):
         if fm["processed_data"]:
@@ -494,63 +526,21 @@ def _render_manager_panel() -> None:
 
     with st.expander("🔬 MRMR Selection", expanded=True):
         for target in TARGETS:
-            entry = fm["mrmr_selection"].get(target)
-            status_text = "Có file" if entry is not None else "Trống"
-            st.markdown(f"**{_target_label(target)}**: {status_text}")
-            upload = st.file_uploader(
-                f"Upload Excel/CSV - {_target_label(target)}",
-                type=["xlsx", "xls", "csv"],
-                key=f"manager_mrmr_upload_{target}",
+            _auto_upload_row(
+                target=target,
+                entry=fm["mrmr_selection"].get(target),
+                upload_type="mrmr",
+                file_types=["xlsx", "xls", "csv"],
             )
-            if st.button(f"Upload {_target_label(target)} Excel", key=f"manager_mrmr_button_{target}", use_container_width=True):
-                if upload is None:
-                    st.warning("Hãy chọn file MRMR trước khi upload.")
-                else:
-                    try:
-                        _upload_mrmr_file(target, upload)
-                        st.success(f"Đã cập nhật MRMR cho {_target_label(target)}.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Không thể upload MRMR: {exc}")
-            if entry is not None:
-                st.download_button(
-                    f"Tải {_target_label(target)} Excel",
-                    data=_selection_to_download_bytes(target),
-                    file_name=entry.get("name") or f"mrmr_{target}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download_mrmr_{target}",
-                    use_container_width=True,
-                )
 
     with st.expander("🎓 Model", expanded=True):
         for target in TARGETS:
-            entry = fm["models"].get(target)
-            status_text = "Có model" if entry is not None else "Trống"
-            st.markdown(f"**{_target_label(target)}**: {status_text}")
-            upload = st.file_uploader(
-                f"Upload model (.pth) - {_target_label(target)}",
-                type=["pth"],
-                key=f"manager_model_upload_{target}",
+            _auto_upload_row(
+                target=target,
+                entry=fm["models"].get(target),
+                upload_type="model",
+                file_types=["pth"],
             )
-            if st.button(f"Upload Model (.pth) - {_target_label(target)}", key=f"manager_model_button_{target}", use_container_width=True):
-                if upload is None:
-                    st.warning("Hãy chọn file model trước khi upload.")
-                else:
-                    try:
-                        _upload_model_file(target, upload)
-                        st.success(f"Đã cập nhật model cho {_target_label(target)}.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Không thể upload model: {exc}")
-            if entry is not None and entry.get("checkpoint") is not None:
-                st.download_button(
-                    f"Tải {_target_label(target)} .pth",
-                    data=_checkpoint_to_bytes(entry["checkpoint"]),
-                    file_name=entry.get("name") or f"{target}_mrmr_lstm.pth",
-                    mime="application/octet-stream",
-                    key=f"download_model_{target}",
-                    use_container_width=True,
-                )
 
 
 def _layout_with_manager(main_render_fn) -> None:
@@ -910,6 +900,12 @@ PAGE_FUNCS = {
 
 
 def render_app() -> None:
+    _ensure_state()
+    current_page = st.session_state.get("page", "Home")
+    if current_page not in PAGE_FUNCS:
+        current_page = "Home"
+        st.session_state.page = current_page
+
     with st.sidebar:
         st.title("🧠 EEG Emotion")
         st.caption("Recognition Dashboard")
@@ -923,13 +919,13 @@ def render_app() -> None:
             "Predict": "🔮 Predict",
         }
         for key, label in pages.items():
-            is_active = st.session_state.page == key
+            is_active = current_page == key
             st.button(label, on_click=goto, args=(key,), use_container_width=True, type="primary" if is_active else "secondary")
         st.markdown("---")
         st.caption("DEAP Dataset · MRMR · BiLSTM")
         st.caption("Mainstream – Emotion Recognition")
 
-    PAGE_FUNCS[st.session_state.page]()
+    PAGE_FUNCS[current_page]()
 
 
 def main() -> None:
