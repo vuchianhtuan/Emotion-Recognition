@@ -4,7 +4,8 @@ import io
 import os
 import pickle
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed # Sửa dòng này
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 import matplotlib
@@ -50,6 +51,8 @@ DEAP_ELECTRODES = [
 ]
 TARGETS = ("arousal", "valence")
 
+DEBUG_MODE = True  # Đổi thành False để ẩn toàn bộ tính năng kiểm thử
+TEST_DATA_DIR = "test_data" # Tên thư mục bạn sẽ tạo trên server để chứa file test
 
 def _init_state() -> None:
     defaults = {
@@ -129,7 +132,7 @@ def _extract_channels(selection: Any) -> list[int]:
             series = selection["channels"]
         else:
             series = selection.iloc[:, 0]
-        return [int(value) for value in series.tolist()]
+            return [int(value) for value in series.tolist()]
     if isinstance(selection, (list, tuple, np.ndarray, pd.Series)):
         return [int(value) for value in selection]
     raise TypeError(f"Unsupported MRMR selection type: {type(selection)!r}")
@@ -654,16 +657,60 @@ def _render_manager_panel() -> None:
 
     with st.expander("📂 Data", expanded=True):
         if fm["raw_data"]:
-            for item in fm["raw_data"]:
+            # Hiển thị tối đa 2 file đầu tiên
+            for item in fm["raw_data"][:2]:
                 st.write(f"• {item['name']}")
+            
+            # Quản lý Mở rộng / Thu gọn bằng session_state
+            if len(fm["raw_data"]) > 2:
+                # Khởi tạo trạng thái nếu chưa có
+                if "expand_raw_data" not in st.session_state:
+                    st.session_state.expand_raw_data = False
+                
+                remaining_count = len(fm["raw_data"]) - 2
+                
+                # Nút bấm chuyển đổi trạng thái
+                if not st.session_state.expand_raw_data:
+                    # Nút Mở rộng
+                    if st.button(f"Mở rộng (+{remaining_count} file) ▾", key="btn_expand_raw_data", use_container_width=True):
+                        st.session_state.expand_raw_data = True
+                        st.rerun()
+                else:
+                    # Hiển thị phần còn lại (Nó sẽ đẩy các component bên dưới xuống)
+                    for item in fm["raw_data"][2:]:
+                        st.write(f"• {item['name']}")
+                        
+                    # Nút Thu gọn nằm ngay bên dưới
+                    if st.button("Thu gọn ▴", key="btn_collapse_raw_data", use_container_width=True):
+                        st.session_state.expand_raw_data = False
+                        st.rerun()
         else:
             st.caption("Chưa có file .dat nào.")
-        st.caption("Upload .dat chỉ thực hiện tại trang Load DEAP Data.")
 
     with st.expander("⚡ Processed Data", expanded=True):
         if fm["processed_data"]:
-            for item in fm["processed_data"]:
+            # Hiển thị tối đa 2 file đầu tiên
+            for item in fm["processed_data"][:2]:
                 st.write(f"• {item['name']}")
+            
+            # Quản lý Mở rộng / Thu gọn bằng session_state giống Raw Data
+            if len(fm["processed_data"]) > 2:
+                if "expand_processed_data" not in st.session_state:
+                    st.session_state.expand_processed_data = False
+                
+                remaining_count = len(fm["processed_data"]) - 2
+                
+                if not st.session_state.expand_processed_data:
+                    if st.button(f"Mở rộng (+{remaining_count} file) ▾", key="btn_expand_processed_data", use_container_width=True):
+                        st.session_state.expand_processed_data = True
+                        st.rerun()
+                else:
+                    for item in fm["processed_data"][2:]:
+                        st.write(f"• {item['name']}")
+                        
+                    if st.button("Thu gọn ▴", key="btn_collapse_processed_data", use_container_width=True):
+                        st.session_state.expand_processed_data = False
+                        st.rerun()
         else:
             st.caption("Chưa có dữ liệu FFT.")
 
@@ -735,51 +782,107 @@ def page_load_data() -> None:
                 with st.status("Đang nạp dữ liệu...", expanded=True) as status:
                     _store_raw_data(uploaded)
                     status.update(label=f"Đã load {len(uploaded)} file .dat", state="complete")
-                st.success(f"Đã load {len(uploaded)} file(s).")
+
+        # --- BẮT ĐẦU ĐOẠN CODE KIỂM THỬ THÊM VÀO ---
+        if DEBUG_MODE:
+            with st.expander("🛠 Chế độ Kiểm thử (Load siêu tốc trực tiếp từ Server)", expanded=True):
+                st.caption(f"Hãy tạo thư mục `{TEST_DATA_DIR}` cùng cấp với code và ném các file .dat vào đó.")
+                if os.path.exists(TEST_DATA_DIR):
+                    test_files = [f for f in os.listdir(TEST_DATA_DIR) if f.endswith('.dat')]
+                    if test_files:
+                        col_a, col_b = st.columns([3, 1])
+                        with col_a:
+                            selected_test_file = st.selectbox("Chọn file test:", test_files, label_visibility="collapsed")
+                        with col_b:
+                            if st.button("⚡ Nạp file này", use_container_width=True):
+                                # Class giả lập file upload của Streamlit
+                                class MockFile:
+                                    def __init__(self, filepath, filename):
+                                        self.name = filename
+                                        self.filepath = filepath
+                                    def read(self):
+                                        with open(self.filepath, "rb") as f:
+                                            return f.read()
+                                
+                                mock_file = MockFile(os.path.join(TEST_DATA_DIR, selected_test_file), selected_test_file)
+                                with st.status(f"Đang đọc {selected_test_file} từ ổ cứng server...", expanded=True) as status:
+                                    _store_raw_data([mock_file])
+                                    status.update(label=f"Đã load {selected_test_file} siêu tốc!", state="complete")
+                                st.rerun() # Tải lại trang để cập nhật giao diện Preview
+                    else:
+                        st.info(f"Thư mục `{TEST_DATA_DIR}` đang trống.")
+                else:
+                    st.warning(f"Chưa tìm thấy thư mục `{TEST_DATA_DIR}` trên server. Hãy tạo nó!")
+        # --- KẾT THÚC ĐOẠN CODE KIỂM THỬ ---
 
         raw_records = _get_raw_records()
         if raw_records:
-            st.markdown("---")
-            st.subheader("Preview dữ liệu")
-            current = raw_records[0]
-            subject = current["subject"]
-            st.write(
-                f"**File**: {current['name']} | Trials: {subject['data'].shape[0]} | Channels: {subject['data'].shape[1]} | Samples: {subject['data'].shape[2]}"
-            )
-            trial_idx = st.slider("Chọn Trial", 0, subject["data"].shape[0] - 1, 0)
-            ch_idx = st.slider("Chọn kênh EEG", 0, N_CHANNELS - 1, 0)
-            raw_signal = subject["data"][trial_idx, ch_idx, :]
-            label_val = subject["labels"][trial_idx]
-
-            col_a, col_b = st.columns([2, 1])
-            with col_a:
-                fig, ax = plt.subplots(figsize=(8, 3))
-                t = np.arange(len(raw_signal)) / 128.0
-                ax.plot(t, raw_signal, linewidth=0.7)
-                ax.set_xlabel("Time (s)")
-                ax.set_ylabel("Amplitude (μV)")
-                ax.set_title(f"EEG – {_channel_name(ch_idx)} | Trial {trial_idx}")
-                ax.grid(True, alpha=0.3)
-                st.pyplot(fig)
-                plt.close(fig)
-            with col_b:
-                st.write(f"**Valence**: {label_val[0]:.1f}")
-                st.write(f"**Arousal**: {label_val[1]:.1f}")
-                st.metric("Dominance", f"{label_val[2]:.1f}")
-                st.metric("Liking", f"{label_val[3]:.1f}")
+            preview_name_key = "dashboard_load_data_selected_name"
+            record_names = [record["name"] for record in raw_records]
+            options = ["None"] + record_names  # Thêm None vào đầu danh sách
+            current_name = st.session_state.get(preview_name_key, "None")
+            if current_name not in options:
+                current_name = "None"
+                st.session_state[preview_name_key] = current_name
 
             st.markdown("---")
-            st.subheader("Phân bố nhãn")
-            label_frame = subject["labels"][:, :2]
-            c1, c2 = st.columns(2)
-            for container, name, idx in ((c1, "Valence", 0), (c2, "Arousal", 1)):
-                with container:
-                    counts = pd.Series((label_frame[:, idx] >= 5).astype(int)).value_counts().rename({0: "Low", 1: "High"})
-                    fig, ax = plt.subplots(figsize=(3, 3))
-                    ax.pie(counts, labels=counts.index, autopct="%1.0f%%", colors=["#5b8dd9", "#e07b39"])
-                    ax.set_title(name)
+            # Tăng chiều rộng cột đầu và thêm thuộc tính nowrap để ép chữ trên 1 dòng
+            header_col, action_col, _ = st.columns([2.2, 1.5, 6.3], gap="small")
+            with header_col:
+                st.markdown("<h3 style='margin-top:-8px; white-space: nowrap;'>Preview dữ liệu:</h3>", unsafe_allow_html=True)
+            with action_col:
+                # Nút popover chỉ in tên, không có dấu •
+                with st.popover(current_name):
+                    st.radio(
+                        "File .dat",
+                        options, # Dùng danh sách có chữ None
+                        index=options.index(current_name),
+                        key=preview_name_key,
+                        label_visibility="collapsed",
+                    )
+
+            if current_name != "None":
+                current = next(record for record in raw_records if record["name"] == current_name)
+                subject = current["subject"]
+                st.write(
+                    f"**File**: {current['name']} | Trials: {subject['data'].shape[0]} | Channels: {subject['data'].shape[1]} | Samples: {subject['data'].shape[2]}"
+                )
+                trial_idx = st.slider("Chọn Trial", 0, subject["data"].shape[0] - 1, 0)
+                ch_idx = st.slider("Chọn kênh EEG", 0, N_CHANNELS - 1, 0)
+                raw_signal = subject["data"][trial_idx, ch_idx, :]
+                label_val = subject["labels"][trial_idx]
+
+                col_a, col_b = st.columns([2, 1])
+                with col_a:
+                    fig, ax = plt.subplots(figsize=(8, 3))
+                    t = np.arange(len(raw_signal)) / 128.0
+                    ax.plot(t, raw_signal, linewidth=0.7)
+                    ax.set_xlabel("Time (s)")
+                    ax.set_ylabel("Amplitude (μV)")
+                    ax.set_title(f"EEG – {_channel_name(ch_idx)} | Trial {trial_idx}")
+                    ax.grid(True, alpha=0.3)
                     st.pyplot(fig)
                     plt.close(fig)
+                with col_b:
+                    st.write(f"**Valence**: {label_val[0]:.1f}")
+                    st.write(f"**Arousal**: {label_val[1]:.1f}")
+                    st.metric("Dominance", f"{label_val[2]:.1f}")
+                    st.metric("Liking", f"{label_val[3]:.1f}")
+
+                st.markdown("---")
+                st.subheader("Phân bố nhãn")
+                label_frame = subject["labels"][:, :2]
+                c1, c2 = st.columns(2)
+                for container, name, idx in ((c1, "Valence", 0), (c2, "Arousal", 1)):
+                    with container:
+                        counts = pd.Series((label_frame[:, idx] >= 5).astype(int)).value_counts().rename({0: "Low", 1: "High"})
+                        fig, ax = plt.subplots(figsize=(3, 3))
+                        ax.pie(counts, labels=counts.index, autopct="%1.0f%%", colors=["#5b8dd9", "#e07b39"])
+                        ax.set_title(name)
+                        st.pyplot(fig)
+                        plt.close(fig)
+            else:
+                st.info("Vui lòng chọn một file phía trên để xem trước dữ liệu.")
 
         st.button("Tiếp tục → Preprocess", on_click=goto, args=("Preprocess",))
 
@@ -805,35 +908,122 @@ def page_preprocess() -> None:
         step_size = col_b.number_input("Step size (samples)", value=16, min_value=4, max_value=128, step=4)
 
         if st.button("🚀 Bắt đầu Preprocess", type="primary"):
-            processed = []
+            processed = [None] * len(raw_records)
             progress = st.progress(0)
             status_text = st.empty()
-            for index, record in enumerate(raw_records):
-                status_text.info(f"Đang xử lý {record['name']} ({index + 1}/{len(raw_records)})")
-                preprocessed = preprocess_subject_fft(record["subject"], window_size=int(window_size), step_size=int(step_size))
-                processed.append(_normalize_processed_record(record["name"], preprocessed, {"window_size": int(window_size), "step_size": int(step_size)}))
-                progress.progress((index + 1) / len(raw_records))
-            _file_manager()["processed_data"] = processed
+            
+            status_text.info(f"Đang phân bổ tác vụ FFT lên toàn bộ CPU cores (Đa tiến trình)...")
+            
+            # Đổi sang ProcessPoolExecutor để vượt qua GIL
+            with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+                future_to_idx = {
+                    executor.submit(
+                        preprocess_subject_fft, 
+                        record["subject"], 
+                        window_size=int(window_size), 
+                        step_size=int(step_size)
+                    ): (idx, record) 
+                    for idx, record in enumerate(raw_records)
+                }
+                
+                completed = 0
+                for future in as_completed(future_to_idx):
+                    idx, record = future_to_idx[future]
+                    try:
+                        preprocessed = future.result()
+                        processed[idx] = _normalize_processed_record(
+                            record["name"], preprocessed, 
+                            {"window_size": int(window_size), "step_size": int(step_size)}
+                        )
+                    except Exception as exc:
+                        st.error(f"Lỗi khi xử lý {record['name']}: {exc}")
+                        
+                    completed += 1
+                    status_text.info(f"Đang xử lý song song... Hoàn thành {completed}/{len(raw_records)} file.")
+                    progress.progress(completed / len(raw_records))
+            
+            _file_manager()["processed_data"] = [p for p in processed if p is not None]
             status_text.success("Preprocess hoàn tất.")
-            st.success(f"Đã xử lý {len(processed)} subject(s).")
+            st.success(f"Đã trích xuất FFT cho {len(_file_manager()['processed_data'])} subject(s).")
 
         processed_records = _get_processed_records()
         if processed_records:
+            preview_name_key = "dashboard_preprocess_selected_name"
+            record_names = [record["name"] for record in processed_records]
+            options = ["None"] + record_names
+            current_name = st.session_state.get(preview_name_key, "None")
+            
+            if current_name not in options:
+                current_name = "None"
+                st.session_state[preview_name_key] = current_name
+
             st.markdown("---")
-            st.subheader("Kết quả Preprocess")
-            current = processed_records[0]["data"]
-            st.write(f"Subject: `{processed_records[0]['name']}` | Windows: `{current.shape[0]}` | Feature shape: `{current[0][0].shape}`")
-            sample_features = current[0][0]
-            fig, ax = plt.subplots(figsize=(8, 4))
-            im = ax.imshow(sample_features, aspect="auto", cmap="viridis")
-            ax.set_yticks(range(sample_features.shape[0]))
-            ax.set_yticklabels([_channel_name(i) for i in range(sample_features.shape[0])], fontsize=6)
-            ax.set_xticks(range(sample_features.shape[1]))
-            ax.set_xticklabels(MRMR_BAND_NAMES, fontsize=9)
-            ax.set_title("FFT Feature Map – Window 0")
-            plt.colorbar(im, ax=ax, label="Power")
-            st.pyplot(fig)
-            plt.close(fig)
+            # Căn chỉnh tiêu đề và nút popover thẳng hàng giống trang Load Data
+            header_col, action_col, _ = st.columns([2.2, 1.5, 6.3], gap="small")
+            with header_col:
+                st.markdown("<h3 style='margin-top:-8px; white-space: nowrap;'>Preview kết quả:</h3>", unsafe_allow_html=True)
+            with action_col:
+                with st.popover(current_name):
+                    st.radio(
+                        "File .dat",
+                        options,
+                        index=options.index(current_name),
+                        key=preview_name_key,
+                        label_visibility="collapsed",
+                    )
+
+            if current_name != "None":
+                current_record = next(record for record in processed_records if record["name"] == current_name)
+                current_data = current_record["data"]
+                num_windows = current_data.shape[0]
+
+                st.write(
+                    f"**File**: {current_record['name']} | Tổng số Windows: `{num_windows}` | Feature shape: `{current_data[0][0].shape}`"
+                )
+                
+                # Ô nhập số chọn Window (căn trên cùng 1 hàng)
+                st.write("") # Thêm một chút khoảng trắng phía trên cho thoáng
+                col_lbl, col_inp, col_cap = st.columns([2.5, 1.5, 4.5], gap="small")
+                
+                with col_lbl:
+                    st.markdown("<p style='margin-top: 6px; font-weight: 500;'>Chọn Window (Cửa sổ trượt):</p>", unsafe_allow_html=True)
+                
+                with col_inp:
+                    window_idx = st.number_input(
+                        "Chọn Window", 
+                        min_value=0, 
+                        max_value=num_windows - 1, 
+                        value=0, 
+                        step=1, 
+                        label_visibility="collapsed" # Ẩn label mặc định để dùng label tùy chỉnh ở cột trái
+                    )
+                
+                with col_cap:
+                    st.markdown(f"<p style='margin-top: 8px; font-size: 0.85em; color: #666;'>(Nhập từ 0 đến {num_windows - 1})</p>", unsafe_allow_html=True)
+                st.write("") # Thêm một chút khoảng trắng phía dưới
+                
+                sample_features = current_data[window_idx][0]
+                label_bin = current_data[window_idx][1]
+
+                col_a, col_b = st.columns([2, 1])
+                with col_a:
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                    im = ax.imshow(sample_features, aspect="auto", cmap="viridis")
+                    ax.set_yticks(range(sample_features.shape[0]))
+                    ax.set_yticklabels([_channel_name(i) for i in range(sample_features.shape[0])], fontsize=6)
+                    ax.set_xticks(range(sample_features.shape[1]))
+                    ax.set_xticklabels(MRMR_BAND_NAMES, fontsize=9)
+                    ax.set_title(f"FFT Feature Map – Window {window_idx}")
+                    plt.colorbar(im, ax=ax, label="Power")
+                    st.pyplot(fig)
+                    plt.close(fig)
+                
+                with col_b:
+                    st.markdown("**Nhãn nhị phân (Binary Labels)**")
+                    st.write(f"**Valence**: {'High (1)' if label_bin[0] == 1 else 'Low (0)'}")
+                    st.write(f"**Arousal**: {'High (1)' if label_bin[1] == 1 else 'Low (0)'}")
+            else:
+                st.info("Vui lòng chọn một file phía trên để xem trước biểu đồ FFT.")
 
         st.button("Tiếp tục → Train Model", on_click=goto, args=("Train Model",))
 
