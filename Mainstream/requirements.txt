@@ -7,13 +7,17 @@ tqdm>=4.66,<5
 mne>=1.7,<2
 mrmr-selection>=0.2.8
 
-# PyTorch GPU build
-# Change cu121 if your local CUDA driver/toolkit requires a different wheel.
---extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.5.1+cu121
+# Deep Learning (Chuyển sang PyTorch hoàn toàn)
+torch>=2.0.0
 
-# Web dashboard
-streamlit>=1.36,<2
+# Web Dashboard
+streamlit>=1.30
+
+# Data / Utilities
+pandas>=2.0
+openpyxl>=3.1
+scikit-learn>=1.3
+tqdm>=4.66
 
 # Visualization
 matplotlib>=3.8,<4

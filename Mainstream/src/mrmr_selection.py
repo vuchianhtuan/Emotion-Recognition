@@ -64,47 +64,6 @@ def load_subject(participant_id: int) -> dict:
     return subject
 
 
-def preprocess_subject_global(subject: dict, classify_type: str = "arousal") -> Tuple[np.ndarray, np.ndarray]:
-    """Preprocess subject for global MRMR: return (features, labels) for all windows."""
-    # Sử dụng preprocess_subject_for_mrmr hoặc implement đơn giản
-    cfg = PreprocessConfig()
-    # Giả sử preprocess_subject_for_mrmr trả về array (n_windows, 2) với [features, labels]
-    # Nhưng cần sửa để trả về (features, labels)
-
-    # Implement đơn giản như trong test_mrmr.py
-    meta = []
-    for i in range(40):  # 40 trials
-        data = subject["data"][i]
-        labels = subject["labels"][i][:2]
-        start = 0
-        while start + WINDOW_SIZE < data.shape[1]:
-            meta_array = []
-            meta_data = []
-            for j in range(N_CHANNELS):
-                x = data[j][start: start + WINDOW_SIZE]
-                y = bin_power_fft(x, band=BANDS, fs=SAMPLING_RATE)
-                meta_data.append(np.array(y[0]))  # list of 5 floats
-            meta_array.append(np.stack(meta_data, axis=0))  # (32, 5)
-            label_bin = np.array(labels >= LABEL_THRESHOLD).astype(int)
-            meta_array.append(label_bin)
-            meta.append(np.array(meta_array, dtype=object))
-            start += STEP_SIZE
-
-    # Extract features and labels
-    n_windows = len(meta)
-    features = np.array([meta[i][0] for i in range(n_windows)])  # (n_windows, 32, 5)
-    labels = np.array([meta[i][1] for i in range(n_windows)])    # (n_windows, 2)
-
-    # Reshape features to (n_windows, 32*5) or keep as is
-    features = features.reshape(n_windows, -1)  # (n_windows, 160)
-
-    # Labels: valence or arousal
-    label_idx = 0 if classify_type == "valence" else 1
-    labels = labels[:, label_idx]
-
-    return features, labels
-
-
 # ───────────────────── FFT band-power (pyeeg replacement) ─────────────────── #
 
 def bin_power_fft(
@@ -273,41 +232,6 @@ def preprocess_and_filter_new_data(subject: dict, selected_channels: List[int], 
     features, labels = preprocess_subject_global(subject, classify_type)
     features_filtered = filter_channels(features, selected_channels)
     return features_filtered, labels
-
-def preprocess_subject_fft(
-    subject: dict,
-    band: Optional[List[int]] = None,
-    window_size: int = WINDOW_SIZE,
-    step_size: int = STEP_SIZE,
-    fs: int = SAMPLING_RATE,
-) -> np.ndarray:
-    """Apply sliding-window FFT on a DEAP subject dictionary.
-
-    Args:
-        subject    : Dictionary loaded from a DEAP ``.dat`` file with keys
-                     ``"data"`` (40, 40, 8064) and ``"labels"`` (40, 4).
-        band       : Band-edge list. Defaults to ``BANDS``.
-        window_size: Samples per window.
-        step_size  : Sliding step in samples.
-        fs         : Sampling rate in Hz.
-
-    Returns:
-        meta: Array of shape ``(n_windows,)`` with dtype ``object``.
-              Each element is ``[features, label_bin]`` where
-              ``features`` has shape ``(N_CHANNELS, N_FREQUENCIES)`` and
-              ``label_bin`` is ``[valence_bin, arousal_bin]`` — matching the
-              DEAP label order used by ``PreProcessing/FFT.py`` (col 0 = valence,
-              col 1 = arousal).
-    """
-    cfg = PreprocessConfig(
-        fs=fs,
-        window_size=window_size,
-        overlap=1.0 - (step_size / float(window_size)),
-        n_eeg_channels=N_CHANNELS,
-        label_threshold=LABEL_THRESHOLD,
-        bands=tuple(BANDS if band is None else band),
-    )
-    return preprocess_subject_for_mrmr(subject, cfg)
 
 
 # ─────────────────────────── MRMR selection ───────────────────────────────── #
@@ -526,3 +450,102 @@ def prepare_for_lstm(
         return x_train, y_train_bin, x_test, y_test_bin, scaler_state
 
     return x_train, y_train_bin, x_test, y_test_bin
+
+
+# ─────────────────────────── Vectorized FFT Core ──────────────────────────── #
+
+def _vectorized_extract_fft_features(
+    subject: dict,
+    window_size: int = WINDOW_SIZE,
+    step_size: int = STEP_SIZE,
+    bands: Optional[List[int]] = None,
+    fs: int = SAMPLING_RATE
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Hàm lõi tính toán FFT siêu tốc (Vectorization).
+    Sử dụng numpy backend C để loại bỏ hoàn toàn vòng lặp for.
+    """
+    if bands is None:
+        bands = BANDS
+        
+    # DEAP data có 40 kênh, lấy 32 kênh EEG đầu tiên
+    data = subject["data"][:, :N_CHANNELS, :]  # Shape: (40 trials, 32 channels, 8064 samples)
+    n_trials, n_ch, n_samples = data.shape
+
+    # 1. Trượt cửa sổ siêu tốc (Vectorized Sliding Window)
+    from numpy.lib.stride_tricks import sliding_window_view
+    # Tạo view ma trận trượt không tốn thêm RAM
+    windows = sliding_window_view(data, window_shape=window_size, axis=-1)
+    windows = windows[:, :, ::step_size, :]  # Lấy theo step_size
+    n_windows_per_trial = windows.shape[2]
+
+    # Đổi chiều và gộp lại: (tổng số windows, 32 channels, 256 samples)
+    windows = np.transpose(windows, (0, 2, 1, 3)).reshape(-1, n_ch, window_size)
+
+    # 2. Tính FFT song song trên toàn bộ ma trận 3D
+    fft_vals = np.abs(np.fft.rfft(windows, axis=-1)) ** 2
+    freqs = np.fft.rfftfreq(window_size, d=1.0 / fs)
+
+    # 3. Tính Power cho từng dải tần (Band Power)
+    powers = []
+    for i in range(len(bands) - 1):
+        low, high = bands[i], bands[i + 1]
+        idx = np.where((freqs >= low) & (freqs < high))[0]
+        if len(idx) > 0:
+            band_power = np.mean(fft_vals[:, :, idx], axis=-1)  # Shape: (n_total_windows, 32)
+        else:
+            band_power = np.zeros((fft_vals.shape[0], n_ch), dtype=np.float32)
+        powers.append(band_power)
+
+    # Gộp các dải tần lại: (n_total_windows, 32, 5)
+    features = np.stack(powers, axis=-1).astype(np.float32)
+
+    # 4. Trích xuất và lặp nhãn (Labels)
+    labels_raw = subject["labels"][:, :2]  # Lấy Valence (0) và Arousal (1)
+    labels_bin = (labels_raw >= LABEL_THRESHOLD).astype(int)
+    labels_repeated = np.repeat(labels_bin, n_windows_per_trial, axis=0)  # Shape: (n_total_windows, 2)
+
+    return features, labels_repeated
+
+
+def preprocess_subject_global(subject: dict, classify_type: str = "arousal") -> Tuple[np.ndarray, np.ndarray]:
+    """Preprocess subject for global MRMR: return (features, labels) for all windows."""
+    # Gọi hàm lõi Vectorization
+    features_3d, labels_2d = _vectorized_extract_fft_features(subject)
+    
+    # Ép phẳng features từ (n_windows, 32, 5) xuống (n_windows, 160)
+    features_flat = features_3d.reshape(features_3d.shape[0], -1)
+
+    # Lấy nhãn: valence (0) hoặc arousal (1)
+    label_idx = 0 if classify_type == "valence" else 1
+    labels = labels_2d[:, label_idx]
+
+    return features_flat, labels
+
+
+# Hàm bin_power_fft cũ đã bị vô hiệu hoá vì FFT đã được đưa vào hàm Vectorization tổng
+def bin_power_fft(x: np.ndarray, band: List[int] = BANDS, fs: int = SAMPLING_RATE) -> np.ndarray:
+    pass 
+
+
+def preprocess_subject_fft(
+    subject: dict,
+    band: Optional[List[int]] = None,
+    window_size: int = WINDOW_SIZE,
+    step_size: int = STEP_SIZE,
+    fs: int = SAMPLING_RATE,
+) -> np.ndarray:
+    """Apply sliding-window FFT on a DEAP subject dictionary (Vectorized)."""
+    # Gọi hàm lõi Vectorization
+    features_3d, labels_2d = _vectorized_extract_fft_features(
+        subject, window_size, step_size, band, fs
+    )
+
+    # Đóng gói trả về mảng object [features, label_bin] y hệt cấu trúc gốc
+    # Đảm bảo tính tương thích 100% với các hàm build dataset phía sau
+    n_windows = features_3d.shape[0]
+    meta = np.empty(n_windows, dtype=object)
+    for i in range(n_windows):
+        meta[i] = [features_3d[i], labels_2d[i]]
+
+    return meta
