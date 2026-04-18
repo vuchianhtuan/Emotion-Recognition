@@ -1344,8 +1344,8 @@ def page_predict() -> None:
             # Hiển thị thông tin chung của Trial được chọn
             chung_status = "✅ ĐÚNG CẢ 2" if curr_res["both_correct"] else "❌ SAI (Ít nhất 1 nhãn không khớp)"
             st.markdown(f"""
-            <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
-                <h4 style="margin-top: 0;">Thông số Trial {curr_res['trial_id'] + 1}</h4>
+            <div style="background-color: #eaf5ff; border: 1px solid #cce0ff; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                <h4 style="margin-top: 0; color: #004d99;">Thông số Trial {curr_res['trial_id'] + 1}</h4>
                 <b>• Nhãn thực tế:</b> Arousal = <b style='color: #e07b39;'>{curr_res['a_true']}</b> | Valence = <b style='color: #5b8dd9;'>{curr_res['v_true']}</b><br>
                 <b>• Kết quả dự đoán (Đa số):</b> Arousal = <b>{curr_res['a_pred']}</b> | Valence = <b>{curr_res['v_pred']}</b> ➡️ <b>{chung_status}</b>
             </div>
