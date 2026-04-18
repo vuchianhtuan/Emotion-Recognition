@@ -28,9 +28,6 @@ from tqdm import tqdm
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.preprocessing import normalize, StandardScaler
 
-from .preprocess import PreprocessConfig, preprocess_subject_for_mrmr, bin_power_fft
-
-
 # ─────────────────────────── Constants ────────────────────────────────────── #
 
 BANDS: List[int] = [4, 8, 12, 16, 25, 45]   # Band edge frequencies in Hz
