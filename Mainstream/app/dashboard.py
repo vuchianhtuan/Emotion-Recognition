@@ -1,12 +1,13 @@
 from __future__ import annotations
-
 import io
 import os
 import pickle
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed # Sửa dòng này
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
+import threading
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 import matplotlib
 matplotlib.use("Agg")
@@ -14,13 +15,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components # Thêm module này để chạy JS cuộn trang
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import normalize as _normalize, StandardScaler
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 from src.models import build_model
 from src.mrmr_selection import (
     MRMR_COMPONENTS,
@@ -50,13 +51,13 @@ DEAP_ELECTRODES = [
     "C4", "T8", "CP6", "CP2", "P4", "P8", "PO4", "O2",
 ]
 TARGETS = ("arousal", "valence")
-
 DEBUG_MODE = True  # Đổi thành False để ẩn toàn bộ tính năng kiểm thử
 TEST_DATA_DIR = "test_data" # Tên thư mục bạn sẽ tạo trên server để chứa file test
 
 def _init_state() -> None:
     defaults = {
         "page": "Home",
+        "scroll_to_preview": False, # Biến cờ hiệu để kích hoạt auto-scroll
         "file_manager": {
             "raw_data": [],
             "processed_data": [],
@@ -73,13 +74,33 @@ def _init_state() -> None:
         if key not in st.session_state:
             st.session_state[key] = value
 
-
 _init_state()
-
 
 def goto(page: str) -> None:
     st.session_state.page = page
 
+# Hàm callback khi click vào tên file trong File Manager
+def _on_file_link_click(target_page: str, state_key: str, filename: str) -> None:
+    st.session_state.page = target_page
+    st.session_state[state_key] = filename
+    st.session_state.scroll_to_preview = True # Bật cờ hiệu cuộn trang
+
+# Hàm tiện ích chạy Javascript cuộn mượt xuống khu vực Preview
+def _trigger_scroll_if_needed():
+    if st.session_state.get("scroll_to_preview"):
+        components.html(
+            """
+            <script>
+                var parent = window.parent.document;
+                var target = parent.getElementById('preview-section');
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            </script>
+            """,
+            height=0
+        )
+        st.session_state.scroll_to_preview = False
 
 # ------------------------------------------------------------------
 # State helpers
@@ -88,11 +109,9 @@ def _ensure_state() -> None:
     if "file_manager" not in st.session_state or "runtime" not in st.session_state:
         _init_state()
 
-
 def _file_manager() -> dict[str, Any]:
     _ensure_state()
     return st.session_state["file_manager"]
-
 
 def _snapshot_file_manager() -> dict[str, Any]:
     fm = _file_manager()
@@ -103,22 +122,18 @@ def _snapshot_file_manager() -> dict[str, Any]:
         "models": dict(fm["models"]),
     }
 
-
 def _replace_by_name(items: list[dict[str, Any]], name: str, new_item: dict[str, Any]) -> list[dict[str, Any]]:
     filtered = [item for item in items if item.get("name") != name]
     filtered.append(new_item)
     return filtered
 
-
 def _target_label(target: str) -> str:
     return "Arousal" if target == "arousal" else "Valence"
-
 
 def _channel_name(index: int) -> str:
     if 0 <= index < len(DEAP_ELECTRODES):
         return DEAP_ELECTRODES[index]
     return f"Ch{index}"
-
 
 def _extract_channels(selection: Any) -> list[int]:
     if selection is None:
@@ -137,7 +152,6 @@ def _extract_channels(selection: Any) -> list[int]:
         return [int(value) for value in selection]
     raise TypeError(f"Unsupported MRMR selection type: {type(selection)!r}")
 
-
 def _resolve_mrmr_entry(target: str, file_manager: dict[str, Any] | None = None) -> dict[str, Any] | None:
     fm = file_manager or _file_manager()
     entry = fm["mrmr_selection"].get(target)
@@ -146,7 +160,6 @@ def _resolve_mrmr_entry(target: str, file_manager: dict[str, Any] | None = None)
     if isinstance(entry, dict):
         return entry
     return {"name": None, "data": entry, "channels": _extract_channels(entry)}
-
 
 def _resolve_model_entry(target: str, file_manager: dict[str, Any] | None = None) -> dict[str, Any] | None:
     fm = file_manager or _file_manager()
@@ -157,25 +170,20 @@ def _resolve_model_entry(target: str, file_manager: dict[str, Any] | None = None
         return entry
     return {"name": None, "model": entry}
 
-
 def _get_processed_records() -> list[dict[str, Any]]:
     return _file_manager()["processed_data"]
-
 
 def _get_raw_records() -> list[dict[str, Any]]:
     return _file_manager()["raw_data"]
 
-
 def _normalize_raw_record(name: str, subject: dict[str, Any]) -> dict[str, Any]:
     return {"name": name, "subject": subject}
-
 
 def _normalize_processed_record(name: str, data: np.ndarray, meta: dict[str, Any] | None = None) -> dict[str, Any]:
     record = {"name": name, "data": data}
     if meta:
         record.update(meta)
     return record
-
 
 def _store_raw_data(uploaded_files: list[Any]) -> None:
     raw_records = _get_raw_records()
@@ -184,19 +192,16 @@ def _store_raw_data(uploaded_files: list[Any]) -> None:
         raw_records = _replace_by_name(raw_records, file_obj.name, _normalize_raw_record(file_obj.name, subject))
     _file_manager()["raw_data"] = raw_records
 
-
 def _store_processed_data(name: str, data: np.ndarray, meta: dict[str, Any] | None = None) -> None:
     processed_records = _get_processed_records()
     processed_records = _replace_by_name(processed_records, name, _normalize_processed_record(name, data, meta))
     _file_manager()["processed_data"] = processed_records
-
 
 def _selection_dataframe(channels: list[int]) -> pd.DataFrame:
     return pd.DataFrame({
         "channels": [int(value) for value in channels],
         "channel_names": [_channel_name(int(value)) for value in channels],
     })
-
 
 def _store_mrmr_result(target: str, channels: list[int], source: str, name: str | None = None) -> None:
     _file_manager()["mrmr_selection"][target] = {
@@ -206,7 +211,6 @@ def _store_mrmr_result(target: str, channels: list[int], source: str, name: str 
         "source": source,
     }
 
-
 def _store_model_result(target: str, model: nn.Module, checkpoint: dict[str, Any], source: str, name: str | None = None) -> None:
     _file_manager()["models"][target] = {
         "name": name or f"{target}_mrmr_lstm.pth",
@@ -214,7 +218,6 @@ def _store_model_result(target: str, model: nn.Module, checkpoint: dict[str, Any
         "checkpoint": checkpoint,
         "source": source,
     }
-
 
 def _selection_to_download_bytes(target: str) -> bytes:
     entry = _resolve_mrmr_entry(target)
@@ -226,13 +229,11 @@ def _selection_to_download_bytes(target: str) -> bytes:
         df.to_excel(writer, index=False, sheet_name=target.capitalize())
     return output.getvalue()
 
-
 def _checkpoint_to_bytes(checkpoint: dict[str, Any]) -> bytes:
     buffer = io.BytesIO()
     torch.save(checkpoint, buffer)
     buffer.seek(0)
     return buffer.getvalue()
-
 
 def _load_model_from_checkpoint(checkpoint: Any) -> nn.Module:
     if isinstance(checkpoint, nn.Module):
@@ -258,7 +259,6 @@ def _load_model_from_checkpoint(checkpoint: Any) -> nn.Module:
     model.eval()
     return model
 
-
 def _upload_mrmr_file(target: str, uploaded_file: Any) -> None:
     if uploaded_file is None:
         raise ValueError("Chưa chọn file MRMR để upload")
@@ -274,7 +274,6 @@ def _upload_mrmr_file(target: str, uploaded_file: Any) -> None:
         "channels": channels,
         "source": "upload",
     }
-
 
 def _upload_model_file(target: str, uploaded_file: Any) -> None:
     if uploaded_file is None:
@@ -292,17 +291,14 @@ def _upload_model_file(target: str, uploaded_file: Any) -> None:
         uploaded_file.name,
     )
 
-
 def _load_selected_channels(target: str) -> list[int]:
     entry = _resolve_mrmr_entry(target)
     if entry is None:
         return []
     return _extract_channels(entry)
 
-
 def _build_processed_arrays(processed_records: list[dict[str, Any]]) -> list[np.ndarray]:
     return [record["data"] for record in processed_records]
-
 
 def _prepare_training_arrays(processed_records: list[dict[str, Any]], channels: list[int], target: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     processed_arrays = _build_processed_arrays(processed_records)
@@ -328,7 +324,6 @@ def _prepare_training_arrays(processed_records: list[dict[str, Any]], channels: 
     x_test = _reshape_flat_features_for_model(x_test.reshape(x_test.shape[0], -1), n_channels=len(channels))
     return x_train, y_train, x_test, y_test, scaler_state
 
-
 def _predict_windows(model: nn.Module, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     if x.ndim == 2:
         x = x[:, :, np.newaxis]
@@ -345,15 +340,36 @@ def _predict_windows(model: nn.Module, x: np.ndarray) -> tuple[np.ndarray, np.nd
     preds = probs.argmax(axis=1)
     return probs, preds
 
-
 def _prepare_prediction_inputs(processed_record: dict[str, Any], channels: list[int], target: str) -> tuple[np.ndarray, np.ndarray]:
     data = processed_record["data"]
-    x_r, y_r, x_t, y_t = build_mrmr_dataset([data], [channels])
-    x_all = np.concatenate([x_r, x_t], axis=0)
-    y_all = np.concatenate([y_r, y_t], axis=0)
-    y_bin = y_all[:, 0] if target == "arousal" else y_all[:, 1]
-    return x_all.astype(np.float32), y_bin.astype(np.int64)
+    
+    # Bóc tách trực tiếp features và labels để giữ nguyên 100% thứ tự thời gian
+    x_list = []
+    y_list = []
+    for feat, lbl in data:
+        # Chỉ lấy các kênh MRMR đã được chọn
+        x_list.append(feat[channels, :])
+        y_list.append(lbl)
 
+    x_all = np.array(x_list, dtype=np.float32)
+    # Flatten features từ (samples, channels, freqs) -> (samples, channels * freqs)
+    x_flat = x_all.reshape(x_all.shape[0], -1)
+
+    y_all = np.array(y_list, dtype=np.float32)
+    
+    # Đưa nhãn về dạng nhị phân (0/1) nếu đang ở scale 1-9 của DEAP (>= 5 là High)
+    if y_all.max() > 1.0:
+        y_bin = (y_all >= 5.0).astype(np.int64)
+    else:
+        y_bin = y_all.astype(np.int64)
+
+    # ĐÃ SỬA LỖI Ở ĐÂY:
+    # Đồng bộ index với hàm prepare_for_lstm trong quá trình training
+    # Arousal sẽ được đánh giá ở cột 0, Valence ở cột 1
+    target_idx = 0 if target == "arousal" else 1
+    y_target = y_bin[:, target_idx]
+
+    return x_flat, y_target
 
 def _reshape_flat_features_for_model(x_2d: np.ndarray, n_channels: int | None = None) -> np.ndarray:
     if x_2d.ndim != 2:
@@ -373,7 +389,6 @@ def _reshape_flat_features_for_model(x_2d: np.ndarray, n_channels: int | None = 
     x_cf = x_2d.reshape(n_samples, channels, N_FREQUENCIES)
     return x_cf.transpose(0, 2, 1).astype(np.float32)
 
-
 def _flatten_model_features(x_3d: np.ndarray) -> np.ndarray:
     if x_3d.ndim != 3:
         raise ValueError("Input phải là mảng 3D.")
@@ -387,7 +402,6 @@ def _flatten_model_features(x_3d: np.ndarray) -> np.ndarray:
             f"Không suy ra được layout từ shape={x_3d.shape}. Cần có một trục bằng {N_FREQUENCIES}."
         )
     return x_cf.reshape(x_cf.shape[0], -1).astype(np.float32)
-
 
 def _apply_saved_scaler(x: np.ndarray, scaler_state: dict, already_l2_normalized: bool = False) -> np.ndarray:
     if x.ndim == 3:
@@ -421,7 +435,6 @@ def _apply_saved_scaler(x: np.ndarray, scaler_state: dict, already_l2_normalized
         return _reshape_flat_features_for_model(x_scaled, n_channels=original_channels)
     return x_scaled.astype(np.float32)
 
-
 def _to_model_input_layout(features: np.ndarray, model: torch.nn.Module, selected_channels: list[int] | None = None) -> np.ndarray:
     expected_input_size = getattr(getattr(model, "lstm", None), "input_size", None)
 
@@ -450,13 +463,11 @@ def _to_model_input_layout(features: np.ndarray, model: torch.nn.Module, selecte
     flat = _flatten_model_features(features)
     return _reshape_flat_features_for_model(flat, n_channels=channel_hint)
 
-
 def _channel_dataframe(channels: list[int]) -> pd.DataFrame:
     return pd.DataFrame({
         "channels": [int(channel) for channel in channels],
         "channel_names": [_channel_name(int(channel)) for channel in channels],
     })
-
 
 def _run_mrmr_task(target: str, processed_records: list[dict[str, Any]], k: int) -> dict[str, Any]:
     channels = run_mrmr_global_selection(_build_processed_arrays(processed_records), classify_type=target, K=k)
@@ -466,7 +477,6 @@ def _run_mrmr_task(target: str, processed_records: list[dict[str, Any]], k: int)
         "dataframe": _channel_dataframe(channels),
         "file_name": f"mrmr_{target}.xlsx",
     }
-
 
 def _fit_model_for_target(
     target: str,
@@ -569,7 +579,6 @@ def _fit_model_for_target(
         "best_val_acc": best_val_acc,
     }
 
-
 def _predict_target(target: str, processed_record: dict[str, Any], file_manager: dict[str, Any]) -> dict[str, Any]:
     model_entry = _resolve_model_entry(target, file_manager)
     if model_entry is None or model_entry.get("model") is None:
@@ -611,76 +620,75 @@ def _predict_target(target: str, processed_record: dict[str, Any], file_manager:
         "channels": channels,
     }
 
-
 def _render_manager_panel() -> None:
+    # --- CSS HACK: Thu gọn nút link text và Tối ưu hoá khu vực Upload Model ---
+    st.markdown(
+        """
+        <style>
+        /* CSS cho nút link file Text */
+        [data-testid="stExpanderDetails"] button[kind="tertiary"] {
+            padding: 0px !important;
+            min-height: 22px !important;
+            height: 22px !important;
+            line-height: 1.2 !important;
+            justify-content: flex-start !important;
+        }
+        [data-testid="stExpanderDetails"] button[kind="tertiary"] p {
+            font-size: 15px !important; margin: 0 !important; color: #1f77b4;
+        }
+        [data-testid="stExpanderDetails"] button[kind="tertiary"]:hover p {
+            text-decoration: underline; color: #ff4b4b;
+        }
+        
+        /* CSS biến File Uploader thành nút gọn gàng, xoá chữ 200MB */
+        [data-testid="stFileUploadDropzone"] {
+            padding: 0px !important;
+            min-height: 38px !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            border-radius: 6px !important;
+        }
+        [data-testid="stFileUploadDropzone"] small {
+            display: none !important; /* Xoá chữ Limit 200MB per file */
+        }
+        [data-testid="stFileUploadDropzone"] svg {
+            display: none !important; /* Xoá icon đám mây */
+        }
+        [data-testid="stFileUploadDropzone"] div[data-testid="stMarkdownContainer"] {
+            margin: 0 !important;
+            line-height: 1 !important;
+        }
+        [data-testid="stFileUploadDropzone"] span {
+            font-size: 14px !important;
+            font-weight: 500 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+    
     fm = _file_manager()
     st.subheader("🗂 Virtual File Manager")
 
-    def _entry_status_line(target: str, entry: dict[str, Any] | None) -> str:
-        file_name = (entry or {}).get("name")
-        return f"{_target_label(target)}: {file_name if file_name else 'Trống'}"
-
-    def _auto_upload_row(
-        target: str,
-        entry: dict[str, Any] | None,
-        upload_type: str,
-        file_types: list[str],
-    ) -> None:
-        left_col, right_col = st.columns([2.6, 1.2], gap="small")
-        with left_col:
-            st.markdown(f"**{_entry_status_line(target, entry)}**")
-        with right_col:
-            upload = st.file_uploader(
-                f"Upload {_target_label(target)}",
-                type=file_types,
-                key=f"manager_{upload_type}_upload_{target}",
-                label_visibility="collapsed",
-            )
-
-        # Auto-upload ngay khi người dùng chọn file, không cần nút Upload riêng.
-        if upload is not None:
-            content = upload.getvalue()
-            marker_key = f"manager_{upload_type}_uploaded_marker_{target}"
-            file_signature = (upload.name, len(content), hash(content))
-            if st.session_state.get(marker_key) != file_signature:
-                try:
-                    if upload_type == "mrmr":
-                        _upload_mrmr_file(target, upload)
-                        st.success(f"Đã cập nhật MRMR cho {_target_label(target)}.")
-                    else:
-                        _upload_model_file(target, upload)
-                        st.success(f"Đã cập nhật model cho {_target_label(target)}.")
-                    st.session_state[marker_key] = file_signature
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Không thể upload file cho {_target_label(target)}: {exc}")
-
     with st.expander("📂 Data", expanded=True):
         if fm["raw_data"]:
-            # Hiển thị tối đa 2 file đầu tiên
             for item in fm["raw_data"][:2]:
-                st.write(f"• {item['name']}")
+                st.button(f"• {item['name']}", key=f"raw_link_{item['name']}", type="tertiary", 
+                          on_click=_on_file_link_click, args=("Load Data", "dashboard_load_data_selected_name", item["name"]))
             
-            # Quản lý Mở rộng / Thu gọn bằng session_state
             if len(fm["raw_data"]) > 2:
-                # Khởi tạo trạng thái nếu chưa có
                 if "expand_raw_data" not in st.session_state:
                     st.session_state.expand_raw_data = False
-                
                 remaining_count = len(fm["raw_data"]) - 2
-                
-                # Nút bấm chuyển đổi trạng thái
                 if not st.session_state.expand_raw_data:
-                    # Nút Mở rộng
                     if st.button(f"Mở rộng (+{remaining_count} file) ▾", key="btn_expand_raw_data", use_container_width=True):
                         st.session_state.expand_raw_data = True
                         st.rerun()
                 else:
-                    # Hiển thị phần còn lại (Nó sẽ đẩy các component bên dưới xuống)
                     for item in fm["raw_data"][2:]:
-                        st.write(f"• {item['name']}")
-                        
-                    # Nút Thu gọn nằm ngay bên dưới
+                        st.button(f"• {item['name']}", key=f"raw_link_exp_{item['name']}", type="tertiary", 
+                                  on_click=_on_file_link_click, args=("Load Data", "dashboard_load_data_selected_name", item["name"]))
                     if st.button("Thu gọn ▴", key="btn_collapse_raw_data", use_container_width=True):
                         st.session_state.expand_raw_data = False
                         st.rerun()
@@ -689,43 +697,68 @@ def _render_manager_panel() -> None:
 
     with st.expander("⚡ Processed Data", expanded=True):
         if fm["processed_data"]:
-            # Hiển thị tối đa 2 file đầu tiên
             for item in fm["processed_data"][:2]:
-                st.write(f"• {item['name']}")
+                st.button(f"• {item['name']}", key=f"proc_link_{item['name']}", type="tertiary", 
+                          on_click=_on_file_link_click, args=("Preprocess", "dashboard_preprocess_selected_name", item["name"]))
             
-            # Quản lý Mở rộng / Thu gọn bằng session_state giống Raw Data
             if len(fm["processed_data"]) > 2:
                 if "expand_processed_data" not in st.session_state:
                     st.session_state.expand_processed_data = False
-                
                 remaining_count = len(fm["processed_data"]) - 2
-                
                 if not st.session_state.expand_processed_data:
                     if st.button(f"Mở rộng (+{remaining_count} file) ▾", key="btn_expand_processed_data", use_container_width=True):
                         st.session_state.expand_processed_data = True
                         st.rerun()
                 else:
                     for item in fm["processed_data"][2:]:
-                        st.write(f"• {item['name']}")
-                        
+                        st.button(f"• {item['name']}", key=f"proc_link_exp_{item['name']}", type="tertiary", 
+                                  on_click=_on_file_link_click, args=("Preprocess", "dashboard_preprocess_selected_name", item["name"]))
                     if st.button("Thu gọn ▴", key="btn_collapse_processed_data", use_container_width=True):
                         st.session_state.expand_processed_data = False
                         st.rerun()
         else:
             st.caption("Chưa có dữ liệu FFT.")
 
-    with st.expander("🔬 MRMR Selection", expanded=True):
-        st.caption("MRMR được tự chạy trong Train Model và lưu cùng checkpoint.")
-
     with st.expander("🎓 Model", expanded=True):
         for target in TARGETS:
-            _auto_upload_row(
-                target=target,
-                entry=fm["models"].get(target),
-                upload_type="model",
-                file_types=["pth"],
-            )
+            entry = fm["models"].get(target)
+            file_name = (entry or {}).get("name")
+            
+            # Hiển thị tiêu đề Target và Trạng thái
+            st.markdown(f"<div style='font-size: 14.5px; margin-bottom: 5px; line-height: 1.2;'><b>{_target_label(target)}:</b> <span style='color: #666;'>{file_name if file_name else 'Trống'}</span></div>", unsafe_allow_html=True)
+            
+            # Khung chứa nút bấm (Thay đổi linh hoạt dựa trên việc có model hay chưa)
+            if entry and entry.get("checkpoint"):
+                col_up, col_down = st.columns(2, gap="small")
+                with col_up:
+                    upload = st.file_uploader(f"Up_{target}", type=["pth"], key=f"mgr_upl_{target}", label_visibility="collapsed")
+                with col_down:
+                    st.download_button(
+                        "📥 Download", 
+                        data=_checkpoint_to_bytes(entry["checkpoint"]),
+                        file_name=file_name or f"{target}_mrmr_lstm.pth",
+                        mime="application/octet-stream",
+                        key=f"mgr_dwn_{target}",
+                        use_container_width=True
+                    )
+            else:
+                upload = st.file_uploader(f"Up_{target}", type=["pth"], key=f"mgr_upl_{target}", label_visibility="collapsed")
 
+            # Auto-upload Logic
+            if upload is not None:
+                content = upload.getvalue()
+                marker_key = f"manager_model_uploaded_marker_{target}"
+                file_signature = (upload.name, len(content), hash(content))
+                if st.session_state.get(marker_key) != file_signature:
+                    try:
+                        _upload_model_file(target, upload)
+                        st.session_state[marker_key] = file_signature
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Lỗi: {exc}")
+            
+            # Khoảng cách giữa Arousal và Valence
+            st.write("")
 
 def _layout_with_manager(main_render_fn) -> None:
     main_col, manager_col = st.columns([3.5, 1.2], gap="medium")
@@ -733,7 +766,6 @@ def _layout_with_manager(main_render_fn) -> None:
         main_render_fn()
     with manager_col:
         _render_manager_panel()
-
 
 # ------------------------------------------------------------------
 # Pages
@@ -762,7 +794,6 @@ def page_home() -> None:
         st.warning("3. Explore\nXem trước tín hiệu EEG")
         st.warning("6. Predict\nChạy suy luận song song")
 
-
 def page_load_data() -> None:
     def render_main() -> None:
         st.title("📤 Load DEAP Data")
@@ -783,7 +814,6 @@ def page_load_data() -> None:
                     _store_raw_data(uploaded)
                     status.update(label=f"Đã load {len(uploaded)} file .dat", state="complete")
 
-        # --- BẮT ĐẦU ĐOẠN CODE KIỂM THỬ THÊM VÀO ---
         if DEBUG_MODE:
             with st.expander("🛠 Chế độ Kiểm thử (Load siêu tốc trực tiếp từ Server)", expanded=True):
                 st.caption(f"Hãy tạo thư mục `{TEST_DATA_DIR}` cùng cấp với code và ném các file .dat vào đó.")
@@ -795,7 +825,6 @@ def page_load_data() -> None:
                             selected_test_file = st.selectbox("Chọn file test:", test_files, label_visibility="collapsed")
                         with col_b:
                             if st.button("⚡ Nạp file này", use_container_width=True):
-                                # Class giả lập file upload của Streamlit
                                 class MockFile:
                                     def __init__(self, filepath, filename):
                                         self.name = filename
@@ -808,34 +837,34 @@ def page_load_data() -> None:
                                 with st.status(f"Đang đọc {selected_test_file} từ ổ cứng server...", expanded=True) as status:
                                     _store_raw_data([mock_file])
                                     status.update(label=f"Đã load {selected_test_file} siêu tốc!", state="complete")
-                                st.rerun() # Tải lại trang để cập nhật giao diện Preview
+                                st.rerun() 
                     else:
                         st.info(f"Thư mục `{TEST_DATA_DIR}` đang trống.")
                 else:
                     st.warning(f"Chưa tìm thấy thư mục `{TEST_DATA_DIR}` trên server. Hãy tạo nó!")
-        # --- KẾT THÚC ĐOẠN CODE KIỂM THỬ ---
 
         raw_records = _get_raw_records()
         if raw_records:
             preview_name_key = "dashboard_load_data_selected_name"
             record_names = [record["name"] for record in raw_records]
-            options = ["None"] + record_names  # Thêm None vào đầu danh sách
+            options = ["None"] + record_names 
             current_name = st.session_state.get(preview_name_key, "None")
             if current_name not in options:
                 current_name = "None"
                 st.session_state[preview_name_key] = current_name
 
+            # ĐIỂM NEO HTML ĐỂ CUỘN CHUỘT XUỐNG
+            st.markdown("<div id='preview-section'></div>", unsafe_allow_html=True)
             st.markdown("---")
-            # Tăng chiều rộng cột đầu và thêm thuộc tính nowrap để ép chữ trên 1 dòng
+            
             header_col, action_col, _ = st.columns([2.2, 1.5, 6.3], gap="small")
             with header_col:
                 st.markdown("<h3 style='margin-top:-8px; white-space: nowrap;'>Preview dữ liệu:</h3>", unsafe_allow_html=True)
             with action_col:
-                # Nút popover chỉ in tên, không có dấu •
                 with st.popover(current_name):
                     st.radio(
                         "File .dat",
-                        options, # Dùng danh sách có chữ None
+                        options, 
                         index=options.index(current_name),
                         key=preview_name_key,
                         label_visibility="collapsed",
@@ -887,7 +916,7 @@ def page_load_data() -> None:
         st.button("Tiếp tục → Preprocess", on_click=goto, args=("Preprocess",))
 
     _layout_with_manager(render_main)
-
+    _trigger_scroll_if_needed() # Kích hoạt cuộn chuột nếu được yêu cầu từ File Manager
 
 def page_preprocess() -> None:
     def render_main() -> None:
@@ -914,7 +943,6 @@ def page_preprocess() -> None:
             
             status_text.info(f"Đang phân bổ tác vụ FFT lên toàn bộ CPU cores (Đa tiến trình)...")
             
-            # Đổi sang ProcessPoolExecutor để vượt qua GIL
             with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
                 future_to_idx = {
                     executor.submit(
@@ -957,8 +985,10 @@ def page_preprocess() -> None:
                 current_name = "None"
                 st.session_state[preview_name_key] = current_name
 
+            # ĐIỂM NEO HTML ĐỂ CUỘN CHUỘT XUỐNG
+            st.markdown("<div id='preview-section'></div>", unsafe_allow_html=True)
             st.markdown("---")
-            # Căn chỉnh tiêu đề và nút popover thẳng hàng giống trang Load Data
+            
             header_col, action_col, _ = st.columns([2.2, 1.5, 6.3], gap="small")
             with header_col:
                 st.markdown("<h3 style='margin-top:-8px; white-space: nowrap;'>Preview kết quả:</h3>", unsafe_allow_html=True)
@@ -981,8 +1011,7 @@ def page_preprocess() -> None:
                     f"**File**: {current_record['name']} | Tổng số Windows: `{num_windows}` | Feature shape: `{current_data[0][0].shape}`"
                 )
                 
-                # Ô nhập số chọn Window (căn trên cùng 1 hàng)
-                st.write("") # Thêm một chút khoảng trắng phía trên cho thoáng
+                st.write("") 
                 col_lbl, col_inp, col_cap = st.columns([2.5, 1.5, 4.5], gap="small")
                 
                 with col_lbl:
@@ -995,12 +1024,12 @@ def page_preprocess() -> None:
                         max_value=num_windows - 1, 
                         value=0, 
                         step=1, 
-                        label_visibility="collapsed" # Ẩn label mặc định để dùng label tùy chỉnh ở cột trái
+                        label_visibility="collapsed" 
                     )
                 
                 with col_cap:
                     st.markdown(f"<p style='margin-top: 8px; font-size: 0.85em; color: #666;'>(Nhập từ 0 đến {num_windows - 1})</p>", unsafe_allow_html=True)
-                st.write("") # Thêm một chút khoảng trắng phía dưới
+                st.write("") 
                 
                 sample_features = current_data[window_idx][0]
                 label_bin = current_data[window_idx][1]
@@ -1028,7 +1057,7 @@ def page_preprocess() -> None:
         st.button("Tiếp tục → Train Model", on_click=goto, args=("Train Model",))
 
     _layout_with_manager(render_main)
-
+    _trigger_scroll_if_needed() # Kích hoạt cuộn chuột nếu được yêu cầu từ File Manager
 
 def page_train() -> None:
     def render_main() -> None:
@@ -1045,74 +1074,131 @@ def page_train() -> None:
             st.warning("Hãy chọn ít nhất một nhãn để train.")
             return
 
-        col_a, col_b, col_c = st.columns(3)
-        epochs = int(col_a.number_input("Epochs", value=50, min_value=1, max_value=500, step=5))
-        lr = float(col_b.number_input("Learning rate", value=LR, min_value=1e-5, max_value=0.1, format="%.5f"))
-        batch_size = int(col_c.number_input("Batch size", value=BATCH_SIZE, min_value=32, max_value=1024, step=32))
-        dropout = float(st.slider("Dropout", 0.0, 0.8, 0.5, 0.05))
+        with st.expander("⚙️ Advanced Hyperparameters (Epochs, LR, Batch Size, Dropout)", expanded=False):
+            col_a, col_b, col_c = st.columns(3)
+            epochs = int(col_a.number_input("Epochs", value=50, min_value=1, max_value=500, step=5))
+            lr = float(col_b.number_input("Learning rate", value=LR, min_value=1e-5, max_value=0.1, format="%.5f"))
+            batch_size = int(col_c.number_input("Batch size", value=BATCH_SIZE, min_value=32, max_value=1024, step=32))
+            dropout = float(st.slider("Dropout", 0.0, 0.8, 0.5, 0.05))
+        
         k_value = int(st.slider("Số kênh MRMR (K)", min_value=5, max_value=32, value=MRMR_COMPONENTS, step=1))
 
-        if st.button("🚀 Bắt đầu Training", type="primary"):
-            results: dict[str, dict[str, Any]] = {}
-            mrmr_results: dict[str, dict[str, Any]] = {}
-            channels_map: dict[str, list[int]] = {}
+        if "training_progress_state" not in st.session_state.runtime:
+            st.session_state.runtime["training_progress_state"] = {}
 
-            stage_text = st.empty()
-            overall_bar = st.progress(0)
-            mrmr_bar = st.progress(0)
+        start_train = st.button("🚀 Bắt đầu Training", type="primary")
 
-            stage_text.info("Đang chạy MRMR global...")
-            for idx, target in enumerate(selected_targets):
-                mrmr_result = _run_mrmr_task(target, processed_records, k_value)
-                channels_map[target] = mrmr_result["channels"]
-                mrmr_results[target] = mrmr_result
-                _store_mrmr_result(target, mrmr_result["channels"], source="computed", name=mrmr_result["file_name"])
-                mrmr_bar.progress((idx + 1) / max(len(selected_targets), 1))
+        mrmr_container = st.container()
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        prog_col_arousal, prog_col_valence = st.columns(2)
+        progress_ui = {
+            "arousal": {"bar": prog_col_arousal.empty(), "text": prog_col_arousal.empty()},
+            "valence": {"bar": prog_col_valence.empty(), "text": prog_col_valence.empty()}
+        }
 
-            st.session_state.runtime["mrmr_results"] = mrmr_results
-            stage_text.success("MRMR hoàn tất. Danh sách kênh đã được lưu vào model/checkpoint.")
+        # KHI BẤM NÚT BẮT ĐẦU TRAINING
+        if start_train:
+            st.session_state.runtime["mrmr_results"] = {}
+            st.session_state.runtime["training_progress_state"] = {}
+            st.session_state.runtime["training_results"] = {}
 
-            for target in selected_targets:
-                channels = channels_map[target]
-                st.markdown(f"**{_target_label(target)} - Kênh MRMR ({len(channels)}):**")
-                st.dataframe(_channel_dataframe(channels), use_container_width=True, hide_index=True)
+            # LẤY NGỮ CẢNH CỦA LUỒNG CHÍNH ĐỂ TRUYỀN CHO CÁC LUỒNG CON
+            ctx = get_script_run_ctx()
 
-            epoch_bar = st.progress(0)
-            metric_text = st.empty()
-            total_targets = len(selected_targets)
+            # --- 1. CHẠY MRMR SONG SONG ---
+            with st.spinner("Đang chạy MRMR global song song..."):
+                mrmr_results = {}
+                channels_map = {}
+                
+                def thread_safe_mrmr(tgt):
+                    # Bơm chính xác ctx vào luồng phụ
+                    add_script_run_ctx(threading.current_thread(), ctx) 
+                    res = _run_mrmr_task(tgt, processed_records, k_value)
+                    _store_mrmr_result(tgt, res["channels"], source="computed", name=res["file_name"])
+                    return tgt, res
 
-            for target_idx, target in enumerate(selected_targets):
-                stage_text.info(f"Đang training {_target_label(target)} ({target_idx + 1}/{total_targets})")
+                with ThreadPoolExecutor(max_workers=len(selected_targets)) as executor:
+                    futures = [executor.submit(thread_safe_mrmr, target) for target in selected_targets]
+                    for future in as_completed(futures):
+                        tgt, mrmr_result = future.result()
+                        channels_map[tgt] = mrmr_result["channels"]
+                        mrmr_results[tgt] = mrmr_result
+                
+                st.session_state.runtime["mrmr_results"] = mrmr_results
 
+            # Hiển thị text MRMR
+            with mrmr_container:
+                st.markdown("**Kết quả MRMR:**")
+                for target in ["arousal", "valence"]:
+                    if target in channels_map:
+                        ch_names = [_channel_name(c) for c in channels_map[target]]
+                        st.markdown(f"**{_target_label(target)}**: {', '.join(ch_names)}")
+                st.markdown("---")
+
+            # --- 2. CHẠY TRAINING SONG SONG ---
+            results = {}
+            
+            def thread_safe_train(tgt):
+                # Bơm chính xác ctx vào luồng phụ
+                add_script_run_ctx(threading.current_thread(), ctx)
+                
                 def _on_epoch(epoch: int, total: int, tr_loss: float, tr_acc: float, va_loss: float, va_acc: float) -> None:
                     per_target = epoch / max(total, 1)
-                    global_progress = (target_idx + per_target) / max(total_targets, 1)
-                    overall_bar.progress(global_progress)
-                    epoch_bar.progress(per_target)
-                    metric_text.markdown(
-                        f"**{_target_label(target)} - Epoch {epoch}/{total}** | "
+                    prog_text = (
+                        f"**{_target_label(tgt)} - Epoch {epoch}/{total}** | "
                         f"Train Loss: `{tr_loss:.4f}` Acc: `{tr_acc:.3f}` | "
                         f"Val Loss: `{va_loss:.4f}` Acc: `{va_acc:.3f}`"
                     )
+                    progress_ui[tgt]["bar"].progress(per_target)
+                    progress_ui[tgt]["text"].markdown(prog_text)
+                    
+                    st.session_state.runtime["training_progress_state"][tgt] = {
+                        "progress": per_target,
+                        "text": prog_text
+                    }
 
-                result = _fit_model_for_target(
-                    target,
+                res = _fit_model_for_target(
+                    tgt,
                     processed_records,
-                    channels_map[target],
+                    channels_map[tgt],
                     epochs,
                     lr,
                     batch_size,
                     dropout,
                     progress_callback=_on_epoch,
                 )
-                results[target] = result
-                _store_model_result(target, result["model"], result["checkpoint"], source="trained")
-                epoch_bar.progress(1.0)
+                _store_model_result(tgt, res["model"], res["checkpoint"], source="trained")
+                return tgt, res
 
-            stage_text.success("Training hoàn tất")
-            overall_bar.progress(1.0)
+            with ThreadPoolExecutor(max_workers=len(selected_targets)) as executor:
+                futures = [executor.submit(thread_safe_train, target) for target in selected_targets]
+                for future in as_completed(futures):
+                    tgt, result = future.result()
+                    results[tgt] = result
+            
             st.session_state.runtime["training_results"] = results
+            st.rerun()
 
+        # KHI KHÔNG BẤM NÚT (Load lại trang) -> Render lại state
+        elif not start_train:
+            mrmr_results = st.session_state.runtime.get("mrmr_results", {})
+            if mrmr_results:
+                with mrmr_container:
+                    st.markdown("**Kết quả MRMR:**")
+                    for target in ["arousal", "valence"]: 
+                        if target in mrmr_results:
+                            ch_names = [_channel_name(c) for c in mrmr_results[target]["channels"]]
+                            st.markdown(f"**{_target_label(target)}**: {', '.join(ch_names)}")
+                    st.markdown("---")
+
+            state_prog = st.session_state.runtime.get("training_progress_state", {})
+            for target in ["arousal", "valence"]:
+                if target in state_prog:
+                    progress_ui[target]["bar"].progress(state_prog[target]["progress"])
+                    progress_ui[target]["text"].markdown(state_prog[target]["text"])
+
+        # 3. KẾT QUẢ ĐỒ THỊ
         training_results = st.session_state.runtime.get("training_results", {})
         if training_results:
             st.markdown("---")
@@ -1132,18 +1218,11 @@ def page_train() -> None:
                 fig.suptitle(f"{_target_label(target)} – MRMR BiLSTM")
                 st.pyplot(fig)
                 plt.close(fig)
-                st.download_button(
-                    f"Download {_target_label(target)} checkpoint (.pth)",
-                    data=_checkpoint_to_bytes(result["checkpoint"]),
-                    file_name=f"{target}_mrmr_lstm.pth",
-                    mime="application/octet-stream",
-                    key=f"download_train_model_{target}",
-                )
-
-        st.button("Tiếp tục → Predict", on_click=goto, args=("Predict",))
+                # Đã loại bỏ hoàn toàn st.download_button ở đây
+                
+            st.button("Tiếp tục → Predict", on_click=goto, args=("Predict",))
 
     _layout_with_manager(render_main)
-
 
 def page_predict() -> None:
     def render_main() -> None:
@@ -1172,22 +1251,154 @@ def page_predict() -> None:
             return
 
         if st.button("🚀 Predict", type="primary"):
-                file_manager_snapshot = _snapshot_file_manager()
-                with st.status("Đang chạy inference song song...", expanded=True) as status:
-                    results: dict[str, dict[str, Any]] = {}
-                    with ThreadPoolExecutor(max_workers=len(selected_targets)) as executor:
-                        future_map = {executor.submit(_predict_target, target, selected_record, file_manager_snapshot): target for target in selected_targets}
-                        for future in as_completed(future_map):
-                            target = future_map[future]
-                            result = future.result()
-                            results[target] = result
-                            status.write(f"Hoàn thành {_target_label(target)}")
-                    status.update(label="Predict hoàn tất", state="complete")
-                    st.session_state.runtime["prediction_results"] = results
-                    st.dataframe(result["results"].head(20), use_container_width=True, hide_index=True)
+            file_manager_snapshot = _snapshot_file_manager()
+            with st.status("Đang chạy inference song song...", expanded=True) as status:
+                results: dict[str, dict[str, Any]] = {}
+                with ThreadPoolExecutor(max_workers=len(selected_targets)) as executor:
+                    future_map = {executor.submit(_predict_target, target, selected_record, file_manager_snapshot): target for target in selected_targets}
+                    for future in as_completed(future_map):
+                        target = future_map[future]
+                        result = future.result()
+                        results[target] = result
+                        status.write(f"Hoàn thành {_target_label(target)}")
+                status.update(label="Predict hoàn tất", state="complete")
+                st.session_state.runtime["prediction_results"] = results
+        
+        # --- HIỂN THỊ GIAO DIỆN KẾT QUẢ ĐÃ ĐƯỢC CHIA ĐÔI ---
+        prediction_results = st.session_state.runtime.get("prediction_results", {})
+        
+        if prediction_results and "arousal" in prediction_results and "valence" in prediction_results:
+            df_a = prediction_results["arousal"]["results"]
+            df_v = prediction_results["valence"]["results"]
+            
+            # Đảm bảo index trùng khớp
+            if len(df_a) != len(df_v):
+                st.error("Lỗi: Số lượng cửa sổ dự đoán giữa Arousal và Valence không khớp!")
+                return
+            
+            total_windows = len(df_a)
+            # Bộ dữ liệu DEAP có 40 trial/subject.
+            num_trials = 40
+            # Số lượng sample (window) trên mỗi trial
+            wpt = total_windows // num_trials 
+            
+            # Thêm cột trial_id để Groupby chính xác (Sử dụng numpy để tránh lỗi Index)
+            df_a = df_a.copy()
+            df_v = df_v.copy()
+            df_a["trial_id"] = np.clip(np.arange(len(df_a)) // wpt, 0, num_trials - 1)
+            df_v["trial_id"] = np.clip(np.arange(len(df_v)) // wpt, 0, num_trials - 1)
+            
+            trial_results = []
+            
+            # Duyệt qua từng trial_id (từ 0 đến 39)
+            for tid in range(num_trials):
+                # Lọc data của trial hiện tại
+                sub_a = df_a[df_a["trial_id"] == tid]
+                sub_v = df_v[df_v["trial_id"] == tid]
+                
+                # Nếu trial bị trống (do dữ liệu bị cắt ngắn), bỏ qua
+                if len(sub_a) == 0 or len(sub_v) == 0:
+                    continue
+                
+                # Lấy nhãn thực tế (vì trong 1 trial, DEAP chỉ có 1 nhãn duy nhất cho tất cả sample)
+                a_true = sub_a["true_label"].values[0]
+                v_true = sub_v["true_label"].values[0]
+                
+                # Bầu chọn đa số cho Trial
+                a_pred = sub_a["prediction"].mode()[0]
+                v_pred = sub_v["prediction"].mode()[0]
+                
+                trial_results.append({
+                    "trial_id": tid,
+                    "a_true": a_true, "a_pred": a_pred, "a_correct": a_true == a_pred,
+                    "v_true": v_true, "v_pred": v_pred, "v_correct": v_true == v_pred,
+                    "both_correct": (a_true == a_pred) and (v_true == v_pred),
+                    "sub_a": sub_a,
+                    "sub_v": sub_v
+                })
+            
+            # Tính toán % số lượng Trial đúng
+            actual_num_trials = len(trial_results)
+            if actual_num_trials == 0:
+                st.error("Không tìm thấy dữ liệu Trial hợp lệ.")
+                return
+                
+            acc_both = sum(r["both_correct"] for r in trial_results) / actual_num_trials
+            acc_a = sum(r["a_correct"] for r in trial_results) / actual_num_trials
+            acc_v = sum(r["v_correct"] for r in trial_results) / actual_num_trials
+            
+            st.markdown("---")
+            st.subheader("📊 Tổng quan kết quả (Theo Trial)")
+            st.caption(f"Đã phân tích {actual_num_trials} Trials. Một Trial được tính là đúng nếu nhãn chiếm đa số của các sample khớp với nhãn thực tế.")
+            
+            col_metric1, col_metric2, col_metric3 = st.columns(3)
+            col_metric1.metric("Trial Correct (Cả 2 cùng đúng)", f"{acc_both*100:.1f}%")
+            col_metric2.metric("Trial Correct (Chỉ tính Arousal)", f"{acc_a*100:.1f}%")
+            col_metric3.metric("Trial Correct (Chỉ tính Valence)", f"{acc_v*100:.1f}%")
+            
+            st.markdown("---")
+            # Thanh kéo để chọn Trial (từ 1 đến actual_num_trials)
+            selected_trial_idx = st.slider("🎯 Kéo để chọn Trial cần kiểm tra chi tiết", 1, actual_num_trials, 1) - 1
+            curr_res = trial_results[selected_trial_idx]
+            
+            # Hiển thị thông tin chung của Trial được chọn
+            chung_status = "✅ ĐÚNG CẢ 2" if curr_res["both_correct"] else "❌ SAI (Ít nhất 1 nhãn không khớp)"
+            st.markdown(f"""
+            <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                <h4 style="margin-top: 0;">Thông số Trial {curr_res['trial_id'] + 1}</h4>
+                <b>• Nhãn thực tế:</b> Arousal = <b style='color: #e07b39;'>{curr_res['a_true']}</b> | Valence = <b style='color: #5b8dd9;'>{curr_res['v_true']}</b><br>
+                <b>• Kết quả dự đoán (Đa số):</b> Arousal = <b>{curr_res['a_pred']}</b> | Valence = <b>{curr_res['v_pred']}</b> ➡️ <b>{chung_status}</b>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Chia đôi màn hình cho Arousal và Valence
+            col_a_ui, col_v_ui = st.columns(2, gap="medium")
+            
+            # --- CỘT BÊN TRÁI: AROUSAL ---
+            with col_a_ui:
+                st.markdown("<h4 style='text-align: center; color: #e07b39;'>AROUSAL</h4>", unsafe_allow_html=True)
+                df_trial_a = curr_res["sub_a"].reset_index(drop=True)
+                
+                t_acc = (df_trial_a["prediction"] == df_trial_a["true_label"]).mean()
+                st.info(f"**Tỉ lệ Sample đúng trong Trial này:** {t_acc*100:.1f}%\n\n**Dự đoán Trial:** {'✅ Đúng' if curr_res['a_correct'] else '❌ Sai'}")
+                
+                max_p_a = max(1, (len(df_trial_a) - 1) // 10 + 1)
+                page_a = st.number_input("Khoảng Sample (10 samples/trang) - Arousal", min_value=1, max_value=max_p_a, step=1, key="page_a")
+                
+                s_idx = (page_a - 1) * 10
+                e_idx = s_idx + 10
+                st.dataframe(
+                    df_trial_a.iloc[s_idx:e_idx][["window", "true_label", "prediction", "p_high", "p_low"]]
+                    .rename(columns={"window": "Sample ID", "true_label": "Nhãn thực", "prediction": "Dự đoán", "p_high": "Tỉ lệ (High)", "p_low": "Tỉ lệ (Low)"}), 
+                    use_container_width=True, hide_index=True
+                )
+            
+            # --- CỘT BÊN PHẢI: VALENCE ---
+            with col_v_ui:
+                st.markdown("<h4 style='text-align: center; color: #5b8dd9;'>VALENCE</h4>", unsafe_allow_html=True)
+                df_trial_v = curr_res["sub_v"].reset_index(drop=True)
+                
+                t_acc_v = (df_trial_v["prediction"] == df_trial_v["true_label"]).mean()
+                st.info(f"**Tỉ lệ Sample đúng trong Trial này:** {t_acc_v*100:.1f}%\n\n**Dự đoán Trial:** {'✅ Đúng' if curr_res['v_correct'] else '❌ Sai'}")
+                
+                max_p_v = max(1, (len(df_trial_v) - 1) // 10 + 1)
+                page_v = st.number_input("Khoảng Sample (10 samples/trang) - Valence", min_value=1, max_value=max_p_v, step=1, key="page_v")
+                
+                s_idx_v = (page_v - 1) * 10
+                e_idx_v = s_idx_v + 10
+                st.dataframe(
+                    df_trial_v.iloc[s_idx_v:e_idx_v][["window", "true_label", "prediction", "p_high", "p_low"]]
+                    .rename(columns={"window": "Sample ID", "true_label": "Nhãn thực", "prediction": "Dự đoán", "p_high": "Tỉ lệ (High)", "p_low": "Tỉ lệ (Low)"}), 
+                    use_container_width=True, hide_index=True
+                )
+
+        elif prediction_results:
+            st.info("💡 Bạn cần tick cả Arousal và Valence để bật chế độ xem so sánh 2 bên (Split-view). Dưới đây là kết quả đơn:")
+            for tgt, res in prediction_results.items():
+                st.write(f"**{_target_label(tgt)}**")
+                st.dataframe(res["results"].head(20), use_container_width=True, hide_index=True)
 
     _layout_with_manager(render_main)
-
 
 PAGE_FUNCS = {
     "Home": page_home,
@@ -1196,7 +1407,6 @@ PAGE_FUNCS = {
     "Train Model": page_train,
     "Predict": page_predict,
 }
-
 
 def render_app() -> None:
     _ensure_state()
@@ -1225,10 +1435,8 @@ def render_app() -> None:
 
     PAGE_FUNCS[current_page]()
 
-
 def main() -> None:
     render_app()
-
 
 if __name__ == "__main__":
     main()
