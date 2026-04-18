@@ -24,16 +24,16 @@ from sklearn.preprocessing import normalize as _normalize, StandardScaler
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.models import build_model
 from src.mrmr_selection import (
+    MRMR_BAND_NAMES,
     MRMR_COMPONENTS,
     N_FREQUENCIES,
     N_CHANNELS,
     TEST_SPLIT_MODULO,
     build_mrmr_dataset,
+    extract_subject_fft_windows,
     prepare_for_lstm,
-    preprocess_subject_fft,
     run_mrmr_global_selection,
 )
-from src.preprocess import MRMR_BAND_NAMES
 
 st.set_page_config(
     page_title="EEG Emotion Recognition",
@@ -946,7 +946,7 @@ def page_preprocess() -> None:
             with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
                 future_to_idx = {
                     executor.submit(
-                        preprocess_subject_fft, 
+                        extract_subject_fft_windows, 
                         record["subject"], 
                         window_size=int(window_size), 
                         step_size=int(step_size)

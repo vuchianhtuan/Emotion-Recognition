@@ -10,27 +10,19 @@ to ensure compatibility and avoid dependency issues.
 from __future__ import annotations
 
 from typing import List, Optional, Tuple
-
-import numpy as np
-import pandas as pd
-import mrmr
-from tqdm import tqdm
-from sklearn.feature_selection import mutual_info_classif
-from sklearn.preprocessing import normalize, StandardScaler
-
 from pathlib import Path
+import pickle
 
 import numpy as np
 import pandas as pd
-import pickle
 import mrmr
 from tqdm import tqdm
-from sklearn.feature_selection import mutual_info_classif
 from sklearn.preprocessing import normalize, StandardScaler
 
 # ─────────────────────────── Constants ────────────────────────────────────── #
 
 BANDS: List[int] = [4, 8, 12, 16, 25, 45]   # Band edge frequencies in Hz
+MRMR_BAND_NAMES: List[str] = ["Theta", "Alpha", "LowerBeta", "UpperBeta", "Gamma"]
 SAMPLING_RATE: int = 128                      # Hz (DEAP dataset)
 N_CHANNELS: int = 32                          # EEG channels
 N_FREQUENCIES: int = len(BANDS) - 1          # 5 frequency bands
@@ -147,7 +139,7 @@ def use_mrmr_global(participant_list=range(1, 33), components=20, classify_type:
 
     for participant in tqdm(participant_list, desc="Loading participants"):
         subject = load_subject(participant)
-        features, labels = preprocess_subject_global(subject, classify_type.lower())
+        features, labels = extract_subject_fft_flat(subject, classify_type.lower())
         all_features.append(features)
         all_labels.append(labels)
 
@@ -174,7 +166,7 @@ def use_mrmr_global(participant_list=range(1, 33), components=20, classify_type:
 
     for participant in tqdm(participant_list, desc="Applying channels"):
         subject = load_subject(participant)
-        features, labels = preprocess_subject_global(subject, classify_type.lower())
+        features, labels = extract_subject_fft_flat(subject, classify_type.lower())
 
         # Filter channels: giả sử features (n_windows, 160), reshape về (n_windows, 32, 5), filter, flatten lại
         features_reshaped = features.reshape(-1, 32, N_FREQUENCIES)  # (n_windows, 32, 5)
@@ -226,7 +218,7 @@ def filter_channels(features: np.ndarray, selected_channels: List[int], n_freque
 
 def preprocess_and_filter_new_data(subject: dict, selected_channels: List[int], classify_type: str = "arousal") -> Tuple[np.ndarray, np.ndarray]:
     """Preprocess new subject data and filter to selected channels for prediction."""
-    features, labels = preprocess_subject_global(subject, classify_type)
+    features, labels = extract_subject_fft_flat(subject, classify_type)
     features_filtered = filter_channels(features, selected_channels)
     return features_filtered, labels
 
@@ -467,7 +459,7 @@ def _vectorized_extract_fft_features(
         
     # DEAP data có 40 kênh, lấy 32 kênh EEG đầu tiên
     data = subject["data"][:, :N_CHANNELS, :]  # Shape: (40 trials, 32 channels, 8064 samples)
-    n_trials, n_ch, n_samples = data.shape
+    _, n_ch, _ = data.shape
 
     # 1. Trượt cửa sổ siêu tốc (Vectorized Sliding Window)
     from numpy.lib.stride_tricks import sliding_window_view
@@ -505,8 +497,8 @@ def _vectorized_extract_fft_features(
     return features, labels_repeated
 
 
-def preprocess_subject_global(subject: dict, classify_type: str = "arousal") -> Tuple[np.ndarray, np.ndarray]:
-    """Preprocess subject for global MRMR: return (features, labels) for all windows."""
+def extract_subject_fft_flat(subject: dict, classify_type: str = "arousal") -> Tuple[np.ndarray, np.ndarray]:
+    """Extract flattened FFT features and binary labels for one subject."""
     # Gọi hàm lõi Vectorization
     features_3d, labels_2d = _vectorized_extract_fft_features(subject)
     
@@ -520,19 +512,14 @@ def preprocess_subject_global(subject: dict, classify_type: str = "arousal") -> 
     return features_flat, labels
 
 
-# Hàm bin_power_fft cũ đã bị vô hiệu hoá vì FFT đã được đưa vào hàm Vectorization tổng
-def bin_power_fft(x: np.ndarray, band: List[int] = BANDS, fs: int = SAMPLING_RATE) -> np.ndarray:
-    pass 
-
-
-def preprocess_subject_fft(
+def extract_subject_fft_windows(
     subject: dict,
     band: Optional[List[int]] = None,
     window_size: int = WINDOW_SIZE,
     step_size: int = STEP_SIZE,
     fs: int = SAMPLING_RATE,
 ) -> np.ndarray:
-    """Apply sliding-window FFT on a DEAP subject dictionary (Vectorized)."""
+    """Extract per-window FFT features as object array ``[features, label_bin]``."""
     # Gọi hàm lõi Vectorization
     features_3d, labels_2d = _vectorized_extract_fft_features(
         subject, window_size, step_size, band, fs
@@ -546,3 +533,18 @@ def preprocess_subject_fft(
         meta[i] = [features_3d[i], labels_2d[i]]
 
     return meta
+
+
+# Backward-compatible aliases for older imports/call-sites.
+def preprocess_subject_global(subject: dict, classify_type: str = "arousal") -> Tuple[np.ndarray, np.ndarray]:
+    return extract_subject_fft_flat(subject, classify_type)
+
+
+def preprocess_subject_fft(
+    subject: dict,
+    band: Optional[List[int]] = None,
+    window_size: int = WINDOW_SIZE,
+    step_size: int = STEP_SIZE,
+    fs: int = SAMPLING_RATE,
+) -> np.ndarray:
+    return extract_subject_fft_windows(subject, band, window_size, step_size, fs)
