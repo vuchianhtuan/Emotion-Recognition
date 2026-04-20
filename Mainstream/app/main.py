@@ -235,6 +235,34 @@ def _checkpoint_to_bytes(checkpoint: dict[str, Any]) -> bytes:
     buffer.seek(0)
     return buffer.getvalue()
 
+def _load_uploaded_checkpoint(payload: bytes) -> Any:
+    """Load checkpoint across PyTorch versions.
+
+    PyTorch 2.6+ tightened unpickling defaults (weights_only=True by default)
+    which can fail on older checkpoints containing numpy objects.
+    """
+    buffer = io.BytesIO(payload)
+    try:
+        return torch.load(buffer, map_location="cpu")
+    except Exception as exc:
+        message = str(exc)
+        requires_legacy_unpickle = (
+            "Weights only load failed" in message
+            or "Unsupported global" in message
+            or "weights_only" in message
+        )
+        if not requires_legacy_unpickle:
+            raise
+
+        # Retry legacy behavior only for trusted checkpoints.
+        buffer.seek(0)
+        try:
+            return torch.load(buffer, map_location="cpu", weights_only=False)
+        except TypeError:
+            # Older PyTorch versions may not expose weights_only.
+            buffer.seek(0)
+            return torch.load(buffer, map_location="cpu")
+
 def _load_model_from_checkpoint(checkpoint: Any) -> nn.Module:
     if isinstance(checkpoint, nn.Module):
         checkpoint.eval()
@@ -278,7 +306,7 @@ def _upload_mrmr_file(target: str, uploaded_file: Any) -> None:
 def _upload_model_file(target: str, uploaded_file: Any) -> None:
     if uploaded_file is None:
         raise ValueError("Chưa chọn file model để upload")
-    checkpoint = torch.load(io.BytesIO(uploaded_file.getvalue()), map_location="cpu")
+    checkpoint = _load_uploaded_checkpoint(uploaded_file.getvalue())
     model = _load_model_from_checkpoint(checkpoint)
     resolved_target = target
     if isinstance(checkpoint, dict) and checkpoint.get("target") in TARGETS:
