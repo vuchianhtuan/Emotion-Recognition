@@ -103,8 +103,6 @@ _init_state()
 
 def goto(page: str):
     st.session_state.page = page
-
-
 # ── Sidebar navigation ───────────────────────────────────`─────────── #
 with st.sidebar:
     st.title("🧠 EEG Emotion")
