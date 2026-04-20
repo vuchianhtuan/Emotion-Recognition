@@ -479,7 +479,8 @@ def prepare_for_lstm(
     y_train: np.ndarray,
     y_test: np.ndarray,
     classify_type: str = "arousal",
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    return_scaler: bool = False,
+) -> Tuple[np.ndarray, ...]:
     """Normalize features and select the target label column.
 
     Mirrors ``LSTMModel/PrepareDataset.py`` from the original repo
@@ -492,8 +493,9 @@ def prepare_for_lstm(
         classify_type      : ``"arousal"`` or ``"valence"``.
 
     Returns:
-        x_train, y_train_bin, x_test, y_test_bin reshaped for LSTM:
-        x shape: ``(n, features, 1)``; y shape: ``(n,)`` binary int.
+        Default: x_train, y_train_bin, x_test, y_test_bin reshaped for LSTM.
+        If ``return_scaler=True`` also returns a ``scaler_state`` dict with
+        ``mean`` and ``scale`` to reuse the exact training normalization.
     """
     # L2 normalise rows
     x_train = normalize(x_train).astype(np.float32)
@@ -515,5 +517,12 @@ def prepare_for_lstm(
     col = 0 if classify_type.lower() == "arousal" else 1
     y_train_bin = y_train[:, col]
     y_test_bin = y_test[:, col]
+
+    if return_scaler:
+        scaler_state = {
+            "mean": scaler.mean_.astype(np.float32),
+            "scale": scaler.scale_.astype(np.float32),
+        }
+        return x_train, y_train_bin, x_test, y_test_bin, scaler_state
 
     return x_train, y_train_bin, x_test, y_test_bin
