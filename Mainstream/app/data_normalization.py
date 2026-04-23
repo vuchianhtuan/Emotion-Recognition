@@ -70,3 +70,11 @@ def get_processed_records() -> list[dict[str, Any]]:
 def get_raw_records() -> list[dict[str, Any]]:
     """Get all raw data records."""
     return file_manager()["raw_data"]
+
+
+def load_selected_channels(target: str) -> list[int]:
+    """Load selected MRMR channels for a target from session state."""
+    entry = resolve_mrmr_entry(target)
+    if entry is None:
+        return []
+    return extract_channels(entry)

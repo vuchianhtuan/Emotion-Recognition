@@ -1,0 +1,5 @@
+[logger]
+level = "info"
+
+[server]
+maxUploadSize = 1000
