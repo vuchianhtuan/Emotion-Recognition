@@ -1,6 +1,5 @@
-from __future__ import annotations
 """Main entry point for the EEG Emotion Recognition application."""
-
+from __future__ import annotations
 import sys
 import os
 

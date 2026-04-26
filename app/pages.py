@@ -60,14 +60,14 @@ def page_home() -> None:
     st.markdown("---")
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.info("1. Load Data\nUpload file .dat từ DEAP dataset")
-        st.info("4. Train Model\nTự chạy MRMR global và train theo nhãn")
+        st.info("1. Load Data\n\nUpload file .dat từ DEAP dataset")
+        st.info("4. Train Model\n\nTự chạy MRMR global và train theo nhãn")
     with col2:
-        st.success("2. Preprocess\nTrích xuất FFT 5 dải tần")
-        st.success("5. Download Model\nLưu checkpoint kèm channels + scaler")
+        st.success("2. Explore\n\nXem trước tín hiệu EEG")
+        st.success("5. Download Model\n\nLưu checkpoint kèm channels + scaler")
     with col3:
-        st.warning("3. Explore\nXem trước tín hiệu EEG")
-        st.warning("6. Predict\nChạy suy luận song song")
+        st.warning("3. Preprocess\n\nTrích xuất FFT 5 dải tần")
+        st.warning("6. Predict\n\nChạy suy luận song song")
 
 
 def page_load_data() -> None:
@@ -169,11 +169,13 @@ def page_load_data() -> None:
                     st.pyplot(fig)
                     plt.close(fig)
                 with col_b:
-                    st.write(f"**Valence**: {label_val[0]:.1f}")
-                    st.write(f"**Arousal**: {label_val[1]:.1f}")
-                    st.metric("Dominance", f"{label_val[2]:.1f}")
-                    st.metric("Liking", f"{label_val[3]:.1f}")
+                    st.metric("Valence", f"{label_val[0]:.1f}")
+                    st.metric("Arousal", f"{label_val[1]:.1f}")
+                    
+                    st.markdown("---") 
 
+                    st.write(f"**Dominance**: {label_val[2]:.1f}")
+                    st.write(f"**Liking**: {label_val[3]:.1f}")
                 st.markdown("---")
                 st.subheader("Phân bố nhãn")
                 label_frame = subject["labels"][:, :2]
@@ -186,6 +188,12 @@ def page_load_data() -> None:
                         ax.set_title(name)
                         st.pyplot(fig)
                         plt.close(fig)
+                st.markdown("""
+                    <p style='font-size: 0.9em; color: #666; font-style: italic;'>
+                    * Chú thích: Biểu đồ chỉ thể hiện phân bố cho hai chỉ số quan trọng là <b>Valence</b> và <b>Arousal</b>. 
+                    Dữ liệu được nhị phân hóa với ngưỡng <b>5.0</b> (giá trị &ge; 5.0 là Cao/High, &lt; 5.0 là Thấp/Low).
+                    </p>
+                """, unsafe_allow_html=True)
             else:
                 st.info("Vui lòng chọn một file phía trên để xem trước dữ liệu.")
 
