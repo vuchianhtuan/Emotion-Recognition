@@ -102,11 +102,12 @@ streamlit run app/main.py
 
 (Trình duyệt sẽ tự động mở tại địa chỉ: http://localhost:8501)
 
-**Workflow trên Dashboard:**
-1. **📤 Load Data:** Nạp file `.dat` từ DEAP.
-2. **⚡ Preprocess:** Cắt cửa sổ trượt (sliding window) và trích xuất đặc trưng FFT 5 dải tần.
-3. **🎓 Train Model:** Tự động chạy thuật toán MRMR chọn top kênh tối ưu và huấn luyện mô hình.
-4. **🔮 Predict:** Suy luận song song trên dữ liệu mới và trả về độ chính xác theo từng Trial.
+**Workflow trong giao diện:**
+1. **📤 Load Data** – Upload file `.dat`
+2. **⚡ Preprocess** – Trích xuất FFT 5 dải tần
+3. **🔬 MRMR Selection** – Chọn top-K kênh EEG
+4. **🎓 Train Model** – Huấn luyện BiLSTM MRMR
+5. **🔮 Predict** – Dự đoán cảm xúc từ dữ liệu mới
 
 ### 3. Huấn luyện qua Command Line (CLI)
 Nếu bạn muốn chạy ngầm hoặc huấn luyện trên server, sử dụng các lệnh sau cho từng nhãn cảm xúc:
