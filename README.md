@@ -7,6 +7,7 @@ Hệ thống tích hợp pipeline **MRMR** (Minimum Redundancy Maximum Relevance
 ---
 
 ## 📁 Cấu trúc thư mục cơ bản của dự án
+```text
 
 Emotion-Recognition/
 ├── .devcontainer/
@@ -33,7 +34,7 @@ Emotion-Recognition/
 ├── README-app.md
 ├── README.md
 └── requirements.txt
-
+```
 ---
 
 ## 🚀 Hướng dẫn cài đặt và khởi chạy
