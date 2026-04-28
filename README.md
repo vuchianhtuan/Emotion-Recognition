@@ -74,24 +74,6 @@ Lưu ý: trong VS Code bạn có thể dùng Dev Container (Reopen in Container)
 4. Train Model — huấn luyện BiLSTM MRMR
 5. Predict — dự đoán trên dữ liệu mới
 
----
-
-## Chạy huấn luyện
-
-Hiện tại project không có một script CLI chuẩn sẵn (ví dụ `src/train.py`).
-
-- Để huấn luyện dễ nhất: dùng trang **Train Model** trong giao diện Streamlit (`app/main.py`) — chọn cấu hình, MRMR, và nhấn `Train`.
-- Nếu bạn muốn huấn luyện không cần giao diện (headless), tôi có thể thêm một script CLI `src/train.py` theo mẫu sau:
-
-```powershell
-# ví dụ (tùy chỉnh khi script được thêm):
-python -m src.train --target arousal --feat mrmr --data-dir data/raw --epochs 200
-```
-
-Hoặc hiện có thể sử dụng các helper trong `app/` (ví dụ `app/data_processing.py`, `app/model_utils.py`) để tự viết pipeline training.
-
----
-
 ## Chế độ chạy (Run modes)
 
 Project hỗ trợ hai chế độ chạy chính — chọn theo nhu cầu:
