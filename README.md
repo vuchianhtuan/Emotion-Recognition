@@ -32,7 +32,7 @@ Emotion-Recognition/
 
 ## Bước 0 — Chuẩn bị dữ liệu DEAP (bắt buộc)
 
-- Tải DEAP dataset (preprocessed) từ: https://www.eecs.qmul.ac.uk/mmv/datasets/deap/
+- Tải DEAP dataset (preprocessed) từ: https://drive.google.com/drive/folders/15O-qPO1ewUWPFb9kt8gTwmGv4cyr_FG5
 - Đặt các file `s01.dat` … `s32.dat` vào `data/raw/` (tạo thư mục nếu chưa có).
 - Không đẩy các file `.dat` này lên GitHub.
 
