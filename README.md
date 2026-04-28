@@ -1,159 +1,179 @@
-Bài tập lớn môn các vấn đề hiện đại của Kỹ thuật máy tính
-# 🧠 EEG Emotion Recognition
+Bài tập lớn — EEG Emotion Recognition
 
-Dự án phân loại cảm xúc **Valence / Arousal** từ tín hiệu điện não đồ (EEG) sử dụng bộ dữ liệu DEAP.
-Hệ thống tích hợp pipeline **MRMR** (Minimum Redundancy Maximum Relevance) để tối ưu hóa việc chọn kênh tín hiệu và sử dụng mạng **BiLSTM** để huấn luyện mô hình.
+Phân loại cảm xúc Valence / Arousal từ tín hiệu EEG sử dụng bộ dữ liệu DEAP. Dự án tích hợp pipeline MRMR (Minimum Redundancy Maximum Relevance) để chọn kênh quan trọng và mô hình BiLSTM để huấn luyện.
 
 ---
 
-## 📁 Cấu trúc thư mục cơ bản của dự án
-```text
+**Nội dung chính**
+- Tải và chuẩn bị dữ liệu DEAP
+- Pipeline tiền xử lý (FFT 5-band, PSD, DE)
+- Lựa chọn kênh bằng MRMR
+- Mô hình BiLSTM MRMR để phân lớp cảm xúc
+- Giao diện web bằng Streamlit để chạy thử nghiệm và demo
 
+---
+
+**Cấu trúc thư mục (chính)**
+
+```text
 Emotion-Recognition/
 ├── .devcontainer/
-│   └── devcontainer.json
 ├── .streamlit/
-│   └── config.toml
-├── app/
-│   ├── config.py
-│   ├── data_io.py
-│   ├── data_normalization.py
-│   ├── data_processing.py
-│   ├── main.py
-│   ├── model_utils.py
-│   ├── pages.py
-│   ├── state_management.py
-│   ├── ui_components.py
-│   └── ui_helpers.py
-├── src/
-│   ├── models.py
-│   └── mrmr_selection.py
+├── app/                # Streamlit app + UI helpers
+├── src/                # Core model + MRMR selection
 ├── .gitignore
-├── docker-compose.yml
 ├── Dockerfile
-├── README-app.md
-├── README.md
-└── requirements.txt
+├── docker-compose.yml
+├── requirements.txt
+└── README.md
 ```
+
 ---
 
-## 🚀 Hướng dẫn cài đặt và khởi chạy
+## Bước 0 — Chuẩn bị dữ liệu DEAP (bắt buộc)
 
-### 0. Chuẩn bị dữ liệu DEAP (Bắt buộc)
-Dù chạy bằng phương pháp nào, bạn cũng cần chuẩn bị dữ liệu gốc:
-* Tải DEAP dataset (phiên bản preprocessed) từ [Trang chủ DEAP](https://www.eecs.qmul.ac.uk/mmv/datasets/deap/).
-* Đặt các file từ `s01.dat` đến `s32.dat` vào thư mục `data/raw/` (tạo thư mục nếu chưa có).
-* *(Lưu ý: Tuyệt đối không push các file `.dat` này lên GitHub).*
+- Tải DEAP dataset (preprocessed) từ: https://www.eecs.qmul.ac.uk/mmv/datasets/deap/
+- Đặt các file `s01.dat` … `s32.dat` vào `data/raw/` (tạo thư mục nếu chưa có).
+- Không đẩy các file `.dat` này lên GitHub.
 
-Bạn có thể khởi chạy dự án theo 1 trong 2 cách dưới đây:
+---
 
-### 🚀 Cách 1: Chạy bằng Docker (One-command run)
+## Chạy dự án
 
-Cách này tự động hóa 100% quá trình cài đặt, loại bỏ hoàn toàn lỗi xung đột môi trường.
+Có hai cách chính để chạy:
 
-**Yêu cầu**: Máy tính cần cài sẵn Docker Desktop
+1) Chạy bằng Docker (khuyến nghị cho người dùng)
 
-👉 **Dành cho Người Dùng / Chấm Điểm (Chỉ chạy Web)**
+- Yêu cầu: Docker Desktop
+- Từ thư mục gốc, chạy:
 
-1. Mở Terminal (PowerShell/CMD) tại thư mục gốc của dự án trên máy.
-
-2. Khởi chạy toàn bộ hệ thống bằng 1 lệnh duy nhất:
-
+```powershell
 docker-compose up
+```
 
-3. Mở trình duyệt và truy cập:
+- Mở trình duyệt: http://localhost:8501
 
-http://localhost:8501
+2) Chạy local với virtual environment (developer)
 
-👉 **Dành cho Developer (Code & Hot-reload)**
-
-1. Mở thư mục dự án bằng VS Code
-
-2. Nhấp vào thông báo góc dưới bên phải hoặc dùng lệnh:
-
-Dev Containers: Reopen in Container
-
-→ Môi trường sẽ được tự động khởi tạo
-
-3. Mở Terminal bên trong VS Code (lúc này đang ở môi trường Linux/container) và chạy:
-
-streamlit run app/main.py
-
-💡 Lưu ý: Mỗi lần bạn chỉnh sửa code và nhấn Save, web sẽ tự động cập nhật (hot-reload)
-
-### Cách 2: Chạy Local với Virtual Environment (Cách truyền thống)
-Dành cho những ai muốn cài đặt và quản lý gói trực tiếp trên máy tính cá nhân.
-
-1. Tạo và kích hoạt môi trường ảo:
-
-Tạo môi trường: python -m venv venv
-
-Kích hoạt (Windows): venv\Scripts\activate
-
-Kích hoạt (Mac/Linux): source venv/bin/activate
-
-2. Cài đặt thư viện:
-
+```powershell
+python -m venv venv
+venv\Scripts\activate
 pip install -r requirements.txt
-
-3. Khởi chạy Web Dashboard:
-
 streamlit run app/main.py
+```
 
-(Trình duyệt sẽ tự động mở tại địa chỉ: http://localhost:8501)
-
-**Workflow trong giao diện:**
-1. **📤 Load Data** – Upload file `.dat`
-2. **⚡ Preprocess** – Trích xuất FFT 5 dải tần
-3. **🔬 MRMR Selection** – Chọn top-K kênh EEG
-4. **🎓 Train Model** – Huấn luyện BiLSTM MRMR
-5. **🔮 Predict** – Dự đoán cảm xúc từ dữ liệu mới
-
-### 3. Huấn luyện qua Command Line (CLI)
-Nếu bạn muốn chạy ngầm hoặc huấn luyện trên server, sử dụng các lệnh sau cho từng nhãn cảm xúc:
-
-**Huấn luyện mô hình cho nhãn Arousal:**
-`python -m src.train --target arousal --feat mrmr --data-dir data/raw --epochs 200`
-
-**Huấn luyện mô hình cho nhãn Valence:**
-`python -m src.train --target valence --feat mrmr --data-dir data/raw --epochs 200`
+Lưu ý: trong VS Code bạn có thể dùng Dev Container (Reopen in Container) để phát triển trong môi trường Linux chứa sẵn dependencies; sau đó chạy `streamlit run app/main.py`.
 
 ---
 
-## 🧪 Kiến trúc mô hình
+## Workflow trong giao diện Streamlit
 
-Mô hình học sâu chính được sử dụng là **BiLSTM 5 tầng**, được xây dựng bằng PyTorch để thay thế cho phiên bản TensorFlow/Keras cũ.
-
-| Model | Mô tả | Dùng với Command |
-|---|---|---|
-| `EEGMRMRLSTMNet` | **BiLSTM 5 tầng** – khớp kiến trúc DEAP gốc | `--feat mrmr` |
-
-**Chi tiết luồng mạng MRMR BiLSTM:**
-* **Input:** `(batch, K×5, 1)` ← K kênh (lọc bởi MRMR) × 5 dải tần (FFT)
-* **Layer 1:** `BiLSTM(128)` → `Dropout(0.5)`
-* **Layer 2:** `LSTM(256)` → `Dropout(0.5)`
-* **Layer 3:** `LSTM(64)` → `Dropout(0.5)`
-* **Layer 4:** `LSTM(64)` → `Dropout(0.5)`
-* **Layer 5:** `LSTM(32)` → `Dropout(0.35)`
-* **Layer 6:** `Dense(16)` → `ReLU`
-* **Output:** `Dense(2)` → Phân loại `[Low, High]`
+1. Load Data — upload hoặc chỉ đường dẫn đến file `.dat`
+2. Preprocess — trích xuất FFT 5-band / PSD / DE
+3. MRMR Selection — chọn top-K kênh EEG
+4. Train Model — huấn luyện BiLSTM MRMR
+5. Predict — dự đoán trên dữ liệu mới
 
 ---
 
-## 🔄 Nhật ký chuyển đổi (Migration Log)
-So với mã nguồn gốc của bài báo `DEAP-Emotion-Recognition`, dự án này đã có những cải tiến kỹ thuật cốt lõi:
+## Chạy huấn luyện
 
-| Thành phần gốc | Phiên bản hiện tại | Cải tiến đáng chú ý |
-|---|---|---|
-| `pyeeg.bin_power` | `src/mrmr_selection.bin_power_fft` | Tối ưu bằng Numpy FFT, không dùng thư viện pyeeg cũ. |
-| `FeatureExtraction/MRMR.py` | `src/mrmr_selection.py` | Tương thích hoàn toàn với Python ≥ 3.10. Chạy đa luồng (multi-core). |
-| `LSTMModel/Model.py` | `src/models.EEGMRMRLSTMNet` | **Chuyển đổi từ TensorFlow/Keras sang hoàn toàn bằng PyTorch.** |
-| `LSTMModel/PrepareDataset.py`| `src/mrmr_selection.prepare_for_lstm` | **Sửa lỗi Data-leakage** (Phân chia Train/Test bằng Modulo thay vì Random). |
+Hiện tại project không có một script CLI chuẩn sẵn (ví dụ `src/train.py`).
+
+- Để huấn luyện dễ nhất: dùng trang **Train Model** trong giao diện Streamlit (`app/main.py`) — chọn cấu hình, MRMR, và nhấn `Train`.
+- Nếu bạn muốn huấn luyện không cần giao diện (headless), tôi có thể thêm một script CLI `src/train.py` theo mẫu sau:
+
+```powershell
+# ví dụ (tùy chỉnh khi script được thêm):
+python -m src.train --target arousal --feat mrmr --data-dir data/raw --epochs 200
+```
+
+Hoặc hiện có thể sử dụng các helper trong `app/` (ví dụ `app/data_processing.py`, `app/model_utils.py`) để tự viết pipeline training.
 
 ---
 
-## 📄 Tài liệu tham khảo
-* Koelstra, S. et al. *DEAP: A Database for Emotion Analysis Using Physiological Signals.* IEEE TAC, 2012.
-* [MNE-Python Documentation](https://mne.tools/stable/index.html)
-* [PyTorch Documentation](https://pytorch.org/docs/stable/index.html)
-* [mrmr-py (Feature Selection Library)](https://github.com/smazzanti/mrmr)
+## Chế độ chạy (Run modes)
+
+Project hỗ trợ hai chế độ chạy chính — chọn theo nhu cầu:
+
+- **Docker (recommended for users / demo):**
+	- Yêu cầu: `Docker Desktop`.
+	- Khởi chạy toàn bộ stack (web dashboard + môi trường đã cấu hình):
+
+```powershell
+docker-compose up
+```
+
+	- Mở trình duyệt: `http://localhost:8501`.
+
+- **Local / CLI (recommended for development & training):**
+	- Tạo và kích hoạt virtual environment, cài dependencies, và chạy Streamlit app:
+
+```powershell
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run app/main.py
+```
+
+	- Huấn luyện/đánh giá mô hình qua CLI (ví dụ MRMR BiLSTM):
+
+```powershell
+python -m src.train --target arousal --feat mrmr --data-dir data/raw --epochs 200
+python -m src.train --target valence --feat mrmr --data-dir data/raw --epochs 200
+```
+
+	- Lưu ý: đảm bảo đã chuẩn bị dữ liệu DEAP trong `data/raw/` (tập `s01.dat`…`s32.dat`).
+
+---
+
+## Preprocess & định dạng dữ liệu
+
+- Pipeline preprocess (MNE-compatible) chuyển `data/raw/*.dat` → `data/processed/v2_mne/*.npz`.
+- Mỗi `.npz` chứa:
+	- `features`: `(n_windows, 32, 5)`
+	- `labels`: `(n_windows, 2)`
+	- `config_json`: cấu hình preprocess để reproducible
+
+Core preprocess steps: band-pass, notch, baseline removal, windowing, FFT 5-band feature extraction.
+
+---
+
+## Kiến trúc mô hình (MRMR BiLSTM)
+
+- Model chính: `EEGMRMRLSTMNet` — BiLSTM 5 tầng (PyTorch)
+
+Kiến trúc tóm tắt:
+
+Input: `(batch, K×5, 1)`  (K = số kênh sau MRMR × 5 dải tần)
+
+- BiLSTM(128) → Dropout(0.5)
+- LSTM(256) → Dropout(0.5)
+- LSTM(64)  → Dropout(0.5)
+- LSTM(64)  → Dropout(0.5)
+- LSTM(32)  → Dropout(0.35)
+- Dense(16) → ReLU
+- Dense(2)  → Softmax/Logits (phân lớp Low/High)
+
+---
+
+## Scripts & modules chính
+
+- `app/` — Streamlit app và helper UI (xem `app/main.py`)
+- `app/data_processing.py` — chuẩn hóa / đóng gói dữ liệu cho model
+- `app/data_io.py` — I/O cho dữ liệu DEAP / processed arrays
+- `app/model_utils.py` — tập hợp hàm huấn luyện / checkpoint (dùng bởi app)
+- `src/models.py` — định nghĩa mô hình (PyTorch)
+- `src/mrmr_selection.py` — MRMR channel selection
+- `app/main.py` — entry point Streamlit
+
+---
+
+## Tài liệu tham khảo
+
+- Koelstra, S. et al. DEAP: A Database for Emotion Analysis Using Physiological Signals. IEEE TAC, 2012.
+- MNE-Python: https://mne.tools/
+- PyTorch: https://pytorch.org/
+- mrmr-py: https://github.com/smazzanti/mrmr
+
+---
