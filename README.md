@@ -6,7 +6,7 @@ Hệ thống tích hợp pipeline **MRMR** (Minimum Redundancy Maximum Relevance
 
 ---
 
-## 📁 Cấu trúc thư mục cơ bản
+## 📁 Cấu trúc thư mục cơ bản của dự án
 
 Emotion-Recognition/
 ├── .devcontainer/
@@ -46,19 +46,39 @@ Dù chạy bằng phương pháp nào, bạn cũng cần chuẩn bị dữ liệ
 
 Bạn có thể khởi chạy dự án theo 1 trong 2 cách dưới đây:
 
-### Cách 1: Chạy bằng Docker (Khuyến nghị - One-command run)
-Cách này giúp tự động hóa 100% quá trình cài đặt, không lo xung đột thư viện hay khác biệt hệ điều hành. Rất phù hợp để test nhanh hoặc chấm điểm.
+### 🚀 Cách 1: Chạy bằng Docker (One-command run)
 
-**Yêu cầu:** Máy tính cần cài đặt sẵn [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+Cách này tự động hóa 100% quá trình cài đặt, loại bỏ hoàn toàn lỗi xung đột môi trường.
 
-1. Mở Terminal tại thư mục gốc của dự án.
+**Yêu cầu**: Máy tính cần cài sẵn Docker Desktop
 
-2. Khởi chạy hệ thống bằng 1 câu lệnh duy nhất:
+👉 **Dành cho Người Dùng / Chấm Điểm (Chỉ chạy Web)**
 
-   docker-compose up
+1. Mở Terminal (PowerShell/CMD) tại thư mục gốc của dự án trên máy.
 
-Mở trình duyệt và truy cập Web Dashboard tại: http://localhost:8501
-(Lưu ý cho Developer: Khi phát triển, hãy mở dự án bằng VS Code và chọn Reopen in Container để bật tính năng tự động cập nhật code (hot-reload)).
+2. Khởi chạy toàn bộ hệ thống bằng 1 lệnh duy nhất:
+
+docker-compose up
+
+3. Mở trình duyệt và truy cập:
+
+http://localhost:8501
+
+👉 **Dành cho Developer (Code & Hot-reload)**
+
+1. Mở thư mục dự án bằng VS Code
+
+2. Nhấp vào thông báo góc dưới bên phải hoặc dùng lệnh:
+
+Dev Containers: Reopen in Container
+
+→ Môi trường sẽ được tự động khởi tạo
+
+3. Mở Terminal bên trong VS Code (lúc này đang ở môi trường Linux/container) và chạy:
+
+streamlit run app/main.py
+
+💡 Lưu ý: Mỗi lần bạn chỉnh sửa code và nhấn Save, web sẽ tự động cập nhật (hot-reload)
 
 ### Cách 2: Chạy Local với Virtual Environment (Cách truyền thống)
 Dành cho những ai muốn cài đặt và quản lý gói trực tiếp trên máy tính cá nhân.
