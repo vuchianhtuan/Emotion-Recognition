@@ -6,19 +6,13 @@ Hệ thống tích hợp pipeline **MRMR** (Minimum Redundancy Maximum Relevance
 
 ---
 
-## 📁 Cấu trúc thư mục
+## 📁 Cấu trúc thư mục cơ bản
 
 Emotion-Recognition/
-├── .gitignore
+├── .devcontainer/
+│   └── devcontainer.json
 ├── .streamlit/
 │   └── config.toml
-├── Mainstream/
-│   ├── data/
-│   │   ├── processed/
-│   │   └── raw/
-│   └── src/
-├── README-app.md
-├── README.md
 ├── app/
 │   ├── config.py
 │   ├── data_io.py
@@ -30,43 +24,62 @@ Emotion-Recognition/
 │   ├── state_management.py
 │   ├── ui_components.py
 │   └── ui_helpers.py
-├── get_tree.py
-├── requirements.txt
-└── src/
-    ├── models.py
-    └── mrmr_selection.py
+├── src/
+│   ├── models.py
+│   └── mrmr_selection.py
+├── .gitignore
+├── docker-compose.yml
+├── Dockerfile
+├── README-app.md
+├── README.md
+└── requirements.txt
 
 ---
 
-## ⚙️ Cài đặt môi trường
+## 🚀 Hướng dẫn cài đặt và khởi chạy
 
-Sử dụng môi trường ảo (Virtual Environment) để cài đặt các thư viện cần thiết:
-
-**1. Tạo môi trường ảo:**
-`python -m venv venv`
-
-**2. Kích hoạt môi trường:**
-(Trên Windows)
-`venv\Scripts\activate`
-
-**3. Cài đặt thư viện:**
-`pip install -r requirements.txt`
-
----
-
-## 🚀 Hướng dẫn chạy
-
-### 1. Chuẩn bị dữ liệu DEAP
+### 0. Chuẩn bị dữ liệu DEAP (Bắt buộc)
+Dù chạy bằng phương pháp nào, bạn cũng cần chuẩn bị dữ liệu gốc:
 * Tải DEAP dataset (phiên bản preprocessed) từ [Trang chủ DEAP](https://www.eecs.qmul.ac.uk/mmv/datasets/deap/).
-* Đặt các file từ `s01.dat` đến `s32.dat` vào thư mục `data/raw/`.
-* *(Lưu ý: Không push các file này lên GitHub).*
+* Đặt các file từ `s01.dat` đến `s32.dat` vào thư mục `data/raw/` (tạo thư mục nếu chưa có).
+* *(Lưu ý: Tuyệt đối không push các file `.dat` này lên GitHub).*
 
-### 2. Khởi chạy Web Dashboard (Streamlit - Khuyến nghị)
-Giao diện trực quan giúp bạn thực hiện toàn bộ pipeline từ Load Data đến Predict chỉ bằng thao tác click chuột.
+Bạn có thể khởi chạy dự án theo 1 trong 2 cách dưới đây:
 
-`streamlit run app/main.py`
+### Cách 1: Chạy bằng Docker (Khuyến nghị - One-command run)
+Cách này giúp tự động hóa 100% quá trình cài đặt, không lo xung đột thư viện hay khác biệt hệ điều hành. Rất phù hợp để test nhanh hoặc chấm điểm.
 
-*(Truy cập trình duyệt tại địa chỉ: http://localhost:8501)*
+**Yêu cầu:** Máy tính cần cài đặt sẵn [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+
+1. Mở Terminal tại thư mục gốc của dự án.
+
+2. Khởi chạy hệ thống bằng 1 câu lệnh duy nhất:
+
+   docker-compose up
+
+Mở trình duyệt và truy cập Web Dashboard tại: http://localhost:8501
+(Lưu ý cho Developer: Khi phát triển, hãy mở dự án bằng VS Code và chọn Reopen in Container để bật tính năng tự động cập nhật code (hot-reload)).
+
+### Cách 2: Chạy Local với Virtual Environment (Cách truyền thống)
+Dành cho những ai muốn cài đặt và quản lý gói trực tiếp trên máy tính cá nhân.
+
+1. Tạo và kích hoạt môi trường ảo:
+
+Tạo môi trường: python -m venv venv
+
+Kích hoạt (Windows): venv\Scripts\activate
+
+Kích hoạt (Mac/Linux): source venv/bin/activate
+
+2. Cài đặt thư viện:
+
+pip install -r requirements.txt
+
+3. Khởi chạy Web Dashboard:
+
+streamlit run app/main.py
+
+(Trình duyệt sẽ tự động mở tại địa chỉ: http://localhost:8501)
 
 **Workflow trên Dashboard:**
 1. **📤 Load Data:** Nạp file `.dat` từ DEAP.
