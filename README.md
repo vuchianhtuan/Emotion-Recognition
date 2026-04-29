@@ -38,31 +38,39 @@ Emotion-Recognition/
 
 ---
 
-## Chạy dự án
+## 🚀 Hướng dẫn khởi chạy (Run Modes)
 
-Có hai cách chính để chạy:
+Dự án hỗ trợ 2 chế độ chạy tùy theo mục đích sử dụng của bạn:
 
-1) Chạy bằng Docker (khuyến nghị cho người dùng)
+### Cách 1: Chạy bằng Docker (Khuyến nghị cho Người dùng / Demo / Chấm điểm)
+Cách này giúp tự động hóa 100% quá trình setup, không lo xung đột môi trường.
 
-- Yêu cầu: Docker Desktop
-- Từ thư mục gốc, chạy:
+1. **Bật phần mềm Docker Desktop** trên máy tính (đảm bảo hệ thống báo *Engine running*).
+2. Mở Terminal (PowerShell/CMD) tại thư mục gốc của dự án và chạy lệnh:
+   ```bash
+   docker-compose up
+   ```
+3. Mở trình duyệt và truy cập Web Dashboard tại: `http://localhost:8501`
 
-```powershell
-docker-compose up
-```
+*(💡 Mẹo: Để tắt web, nhấp vào Terminal và bấm `Ctrl + C`).*
 
-- Mở trình duyệt: http://localhost:8501
+---
 
-2) Chạy local với virtual environment (developer)
+### Cách 2: Chạy Local với Virtual Environment (Khuyến nghị cho Developer)
+Dành cho việc tùy biến code, huấn luyện ngầm trên server hoặc chạy trực tiếp qua CLI.
 
-```powershell
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-streamlit run app/main.py
-```
+1. Tạo, kích hoạt môi trường ảo và cài đặt thư viện:
+   ```bash
+   python -m venv venv
+   venv\Scripts\activate   # (Dùng `source venv/bin/activate` nếu ở Mac/Linux)
+   pip install -r requirements.txt
+   ```
+2. Khởi chạy Web Dashboard:
+   ```bash
+   streamlit run app/main.py
+   ```
 
-Lưu ý: trong VS Code bạn có thể dùng Dev Container (Reopen in Container) để phát triển trong môi trường Linux chứa sẵn dependencies; sau đó chạy `streamlit run app/main.py`.
+*(🛠️ Lưu ý khi thao tác trên VS Code: Bạn có thể dùng tính năng Dev Containers (Reopen in Container) để VS Code tự động chui vào môi trường Linux đã cấu hình sẵn. Khi đó, chỉ cần mở Terminal gõ `streamlit run app/main.py` mà không cần làm bước 1).*
 
 ---
 
@@ -74,38 +82,17 @@ Lưu ý: trong VS Code bạn có thể dùng Dev Container (Reopen in Container)
 4. Train Model — huấn luyện BiLSTM MRMR
 5. Predict — dự đoán trên dữ liệu mới
 
-## Chế độ chạy (Run modes)
 
-Project hỗ trợ hai chế độ chạy chính — chọn theo nhu cầu:
+## 💻 Huấn luyện qua Command Line (CLI)
 
-- **Docker (recommended for users / demo):**
-	- Yêu cầu: `Docker Desktop`.
-	- Khởi chạy toàn bộ stack (web dashboard + môi trường đã cấu hình):
-
-```powershell
-docker-compose up
-```
-
-	- Mở trình duyệt: `http://localhost:8501`.
-
-- **Local / CLI (recommended for development & training):**
-	- Tạo và kích hoạt virtual environment, cài dependencies, và chạy Streamlit app:
-
-```powershell
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-streamlit run app/main.py
-```
-
-	- Huấn luyện/đánh giá mô hình qua CLI (ví dụ MRMR BiLSTM):
+Nếu bạn không muốn dùng giao diện Web mà muốn huấn luyện ngầm/đánh giá mô hình qua CLI (ví dụ MRMR BiLSTM):
 
 ```powershell
 python -m src.train --target arousal --feat mrmr --data-dir data/raw --epochs 200
 python -m src.train --target valence --feat mrmr --data-dir data/raw --epochs 200
 ```
+*Lưu ý: đảm bảo đã chuẩn bị dữ liệu DEAP trong `data/raw/` (tập `s01.dat`…`s32.dat`).*
 
-	- Lưu ý: đảm bảo đã chuẩn bị dữ liệu DEAP trong `data/raw/` (tập `s01.dat`…`s32.dat`).
 
 ---
 
