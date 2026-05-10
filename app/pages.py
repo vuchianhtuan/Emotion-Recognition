@@ -97,11 +97,17 @@ def page_load_data() -> None:
                 if os.path.exists(TEST_DATA_DIR):
                     test_files = [f for f in os.listdir(TEST_DATA_DIR) if f.endswith('.dat')]
                     if test_files:
+                        # Thêm tuỳ chọn "Tất cả các file" vào đầu danh sách
+                        options = ["--- Tất cả các file ---"] + test_files
+                        
                         col_a, col_b = st.columns([3, 1])
                         with col_a:
-                            selected_test_file = st.selectbox("Chọn file test:", test_files, label_visibility="collapsed")
+                            selected_option = st.selectbox("Chọn file test:", options, label_visibility="collapsed")
                         with col_b:
-                            if st.button("⚡ Nạp file này", use_container_width=True):
+                            # Đổi tên nút bấm linh hoạt theo lựa chọn
+                            btn_label = "⚡ Nạp tất cả" if selected_option == "--- Tất cả các file ---" else "⚡ Nạp file này"
+                            
+                            if st.button(btn_label, use_container_width=True):
                                 class MockFile:
                                     def __init__(self, filepath, filename):
                                         self.name = filename
@@ -110,10 +116,26 @@ def page_load_data() -> None:
                                         with open(self.filepath, "rb") as f:
                                             return f.read()
                                 
-                                mock_file = MockFile(os.path.join(TEST_DATA_DIR, selected_test_file), selected_test_file)
-                                with st.status(f"Đang đọc {selected_test_file} từ ổ cứng server...", expanded=True) as status:
-                                    store_raw_data([mock_file])
-                                    status.update(label=f"Đã load {selected_test_file} siêu tốc!", state="complete")
+                                mock_files_to_load = []
+                                
+                                # Xử lý logic chọn tất cả hoặc chọn 1 file
+                                if selected_option == "--- Tất cả các file ---":
+                                    for f_name in test_files:
+                                        file_path = os.path.join(TEST_DATA_DIR, f_name)
+                                        mock_files_to_load.append(MockFile(file_path, f_name))
+                                    status_msg = f"Đang đọc {len(test_files)} file từ ổ cứng server..."
+                                    success_msg = f"Đã load toàn bộ {len(test_files)} file siêu tốc!"
+                                else:
+                                    file_path = os.path.join(TEST_DATA_DIR, selected_option)
+                                    mock_files_to_load.append(MockFile(file_path, selected_option))
+                                    status_msg = f"Đang đọc {selected_option} từ ổ cứng server..."
+                                    success_msg = f"Đã load {selected_option} siêu tốc!"
+                                
+                                # Nạp dữ liệu
+                                with st.status(status_msg, expanded=True) as status:
+                                    store_raw_data(mock_files_to_load)
+                                    status.update(label=success_msg, state="complete")
+                                
                                 st.rerun() 
                     else:
                         st.info(f"Thư mục `{TEST_DATA_DIR}` đang trống.")
